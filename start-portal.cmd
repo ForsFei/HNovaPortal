@@ -33,6 +33,12 @@ if not exist "node_modules\next\package.json" (
 echo [HNova Portal] Building application...
 call npm run build
 if errorlevel 1 goto failed
+if not exist ".next\server\app\api\data\route.js" (
+  echo [HNova Portal] Build is missing /api/data. Make sure src\app\api\data\route.ts is included in the downloaded source.
+  goto failed
+)
+call npm run seed:services
+if errorlevel 1 goto failed
 
 echo [HNova Portal] Starting http://127.0.0.1:43100
 start "" /min powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File "%~dp0scripts\open-when-ready.ps1"

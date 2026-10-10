@@ -4,7 +4,7 @@
 
 ## 运行
 
-需要 Node.js 22 及以上。Windows 用户可直接双击项目根目录的 **`启动 HNova Portal.cmd`**。首次启动会安装依赖并执行生产构建，然后在浏览器打开 Portal。保持命令窗口开启，关闭窗口即停止服务。
+需要 Node.js 22 及以上。Windows 用户可直接双击项目根目录的 **`start-portal.cmd`**。首次启动会安装依赖、执行生产构建并创建本地数据库，然后在浏览器打开 Portal。保持命令窗口开启，关闭窗口即停止服务。
 
 ```powershell
 npm install
@@ -20,7 +20,9 @@ npm start
 
 生产地址为 `http://127.0.0.1:43100`。SQLite 默认位于 `data/portal.db`，可用 `HNOVA_DB_PATH` 指定绝对路径。请定期备份数据库和主密码；主密码丢失后加密数据无法恢复。
 
-端口规划中的 HNova Portal、Atlas、Muse、Play、Reader、Archive、TrainEcho 已添加为本机服务。若重建数据库，可在首次启动 Portal 后运行 `npm run seed:services` 恢复这些入口；脚本只补缺少的服务，不覆盖已编辑的记录。
+一键启动脚本会自动补充 HNova Portal、Atlas、Muse、Play、Reader、Archive、TrainEcho 七个本机入口。手动使用 `npm run dev` 或 `npm start` 时，可运行 `npm run seed:services` 添加入口；脚本只补缺少的服务，不覆盖已编辑的记录。GitHub 源码压缩包只包含 Portal 项目；其他六个项目需要分别放在 Portal 同级目录，才能使用网页上的启动按钮。
+
+`node_modules` 由 `npm ci` 自动安装，不包含在 GitHub 源码压缩包中。当前 Windows 安装约 417 MiB，主要是 Next.js 及其原生编译组件、图标库和 TypeScript。源码包运行时需要本机完成构建，因此请保留依赖目录；再次启动不会重复安装。
 
 在「服务」页面可启动 Atlas、Muse、TrainEcho 网页服务，以及 Play、Reader、Archive Windows 桌面程序。前三者启动已有构建版本，需先在对应项目完成构建；后三者需已有 exe。启动操作仅对本机固定项目开放，Portal 自身仍通过 `start-portal.cmd` 启动。桌面程序没有网页地址，请使用「启动应用」按钮。关闭 Portal 不会自动停止已启动的项目。
 

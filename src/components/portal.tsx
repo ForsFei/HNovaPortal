@@ -62,6 +62,7 @@ export default function Portal() {
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 3600); };
   const refresh = useCallback(async () => {
     const res = await fetch("/api/data", { cache: "no-store" });
+    if (!res.headers.get("content-type")?.includes("application/json")) throw new Error("数据接口未就绪，请检查启动窗口中的构建结果，确认下载包包含 src/app/api/data/route.ts");
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || "无法读取数据");
     setData(body);

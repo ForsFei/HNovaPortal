@@ -4,19 +4,33 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 const projectDir = path.resolve(import.meta.dirname, "..");
-const planPath = path.resolve(projectDir, "..", "HNova端口规划.md");
 const dbPath = process.env.HNOVA_DB_PATH || path.join(projectDir, "data", "portal.db");
-const plan = fs.readFileSync(planPath, "utf8");
-const definitions = [...plan.matchAll(/^\s*(431(?:00|10|20|30|40|50|60))\s+(HNova\s+\S+)\s+(.+)$/gm)]
-  .map(([, port, name, description]) => ({ port: Number(port), name: name.trim(), description: description.trim() }));
+const definitions = [
+  { port: 43100, name: "HNova Portal", description: "个人导航与服务入口" },
+  { port: 43110, name: "HNova Atlas", description: "本地知识与内容站点" },
+  { port: 43120, name: "HNova Muse", description: "本地音乐服务" },
+  { port: 43130, name: "HNova Play", description: "Windows 桌面应用" },
+  { port: 43140, name: "HNova Reader", description: "Windows 桌面应用" },
+  { port: 43150, name: "HNova Archive", description: "Windows 桌面应用" },
+  { port: 43160, name: "HNova TrainEcho", description: "本地列车服务" }
+];
 
-if (definitions.length !== 7) throw new Error("端口规划中应包含 43100–43160 的七个 HNova 服务；本次没有修改数据库。");
-if (!fs.existsSync(dbPath)) throw new Error("Portal 数据库尚未创建。请先启动 HNova Portal，再运行此脚本。");
+fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
 const db = new Database(dbPath);
 try {
-  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('servers', 'services')").all();
-  if (tables.length !== 2) throw new Error("Portal 数据表尚未初始化。请先启动 HNova Portal。");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS servers (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL, environment TEXT NOT NULL DEFAULT 'Home',
+      description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS services (
+      id TEXT PRIMARY KEY, server_id TEXT REFERENCES servers(id) ON DELETE SET NULL,
+      name TEXT NOT NULL, host TEXT NOT NULL DEFAULT '', port INTEGER, protocol TEXT NOT NULL DEFAULT 'http',
+      path TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]',
+      environment TEXT NOT NULL DEFAULT 'Home', alias TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+    );
+  `);
 
   const host = "127.0.0.1";
   const serverName = "本机 HNova 服务";
