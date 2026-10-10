@@ -29,6 +29,7 @@ npm start
 ## 功能
 
 - Websites：名称、URL、描述、标签、Collection、收藏与 Alias；网格、筛选、搜索。
+- 公开网站自动尝试 favicon，也可在编辑网站时填写图标 URL；加载失败时显示通用网站图标。
 - Services：设备与其服务、Host、端口、协议、路径和环境。
 - Imported：Chrome/Edge 本机资料发现与只读预览、HTML 书签预览、保守 URL 去重、导入历史、整理到 Websites/Private。
 - Private：使用主密码解锁后保存加密网址。

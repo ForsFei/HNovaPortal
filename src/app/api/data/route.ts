@@ -25,7 +25,7 @@ export async function POST(request: Request) {
       db.prepare(`INSERT INTO websites (id,name,url,description,icon,tags,collection,favorite,alias,created_at)
       VALUES (@id,@name,@url,@description,@icon,@tags,@collection,@favorite,@alias,@createdAt)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,description=excluded.description,icon=excluded.icon,tags=excluded.tags,collection=excluded.collection,favorite=excluded.favorite,alias=excluded.alias`).run({
-        id, name, url, description: string(item.description, 1000), icon: string(item.icon, 2048),
+        id, name, url, description: string(item.description, 1000), icon: string(item.icon, 2048) ? safeUrl(item.icon) : "",
         tags: JSON.stringify(tags(item.tags)), collection: string(item.collection, 80), favorite: item.favorite ? 1 : 0,
         alias: string(item.alias, 80), createdAt: now
       });
