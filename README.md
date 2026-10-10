@@ -1,0 +1,47 @@
+# HNova Portal
+
+个人 Web 导航与服务入口。首版面向单用户、本机或可信内网的自托管环境。
+
+## 运行
+
+需要 Node.js 22 及以上。Windows 用户可直接双击项目根目录的 **`启动 HNova Portal.cmd`**。首次启动会安装依赖并执行生产构建，然后在浏览器打开 Portal。保持命令窗口开启，关闭窗口即停止服务。
+
+```powershell
+npm install
+npm run dev
+```
+
+开发地址为 `http://127.0.0.1:43100`。生产构建及运行：
+
+```powershell
+npm run build
+npm start
+```
+
+生产地址为 `http://127.0.0.1:43100`。SQLite 默认位于 `data/portal.db`，可用 `HNOVA_DB_PATH` 指定绝对路径。请定期备份数据库和主密码；主密码丢失后加密数据无法恢复。
+
+端口规划中的 HNova Portal、Atlas、Muse、Play、Reader、Archive、TrainEcho 已添加为本机服务。若重建数据库，可在首次启动 Portal 后运行 `npm run seed:services` 恢复这些入口；脚本只补缺少的服务，不覆盖已编辑的记录。
+
+在「服务」页面可启动 Atlas、Muse、TrainEcho 网页服务，以及 Play、Reader、Archive Windows 桌面程序。前三者启动已有构建版本，需先在对应项目完成构建；后三者需已有 exe。启动操作仅对本机固定项目开放，Portal 自身仍通过 `start-portal.cmd` 启动。桌面程序没有网页地址，请使用「启动应用」按钮。关闭 Portal 不会自动停止已启动的项目。
+
+## 功能
+
+- Websites：名称、URL、描述、标签、Collection、收藏与 Alias；网格、筛选、搜索。
+- Services：设备与其服务、Host、端口、协议、路径和环境。
+- Imported：Chrome/Edge 本机资料发现与只读预览、HTML 书签预览、保守 URL 去重、导入历史、整理到 Websites/Private。
+- Private：使用主密码解锁后保存加密网址。
+- Protected Area：Imported 与 Private 共用主密码和加密服务；手动锁定、5/10/30 分钟自动锁定；锁定时从搜索及组件状态中清除明文。
+- Ctrl+K：搜索网站、服务和当前已解锁的加密网址，也支持 Alias。
+- Light、Dark、System 主题。
+
+## 安全边界
+
+主密码只在浏览器使用。客户端用 Argon2id (`t=3`, `m=65536 KiB`, `p=1`) 派生 AES-256-GCM 密钥，每条加密记录独立随机 96 位 nonce。数据库中的保护区项目只保存类型、密文、nonce、加密版本及时间戳，不保存网址、名称、文件夹或资料名。保险库配置保存随机 salt 与加密验证值。锁定时清除 React 中的已解密列表、搜索查询、导入预览及 CryptoKey 引用。
+
+本项目的 API 只允许 `127.0.0.1`/`localhost` 的约定端口，并校验请求 Origin；启动脚本也绑定 `127.0.0.1`。它**没有公网账号认证**。若以后需要公网部署，必须先增加 HTTPS、登录鉴权、会话安全、CSRF 防护和速率限制。不要将现有服务直接暴露到公网。
+
+Chrome/Edge 导入服务只枚举本机用户目录中 `Default` 与 `Profile N` 的 Bookmarks 文件，在内存中读取副本后解析；不会写回浏览器文件。HTML 文件在浏览器中解析。导入预览仍会短暂进入当前浏览器内存；本机浏览器 API 也会在预览响应中传输明文，因此仅适用于可信本机环境。
+
+## 设计文档
+
+参见 [ARCHITECTURE.md](./ARCHITECTURE.md)。

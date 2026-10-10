@@ -1,0 +1,12 @@
+node_modules/
+.next/
+data/
+*.db
+*.db-shm
+*.db-wal
+.env*
+!.env.example
+*.tsbuildinfo
+task_plan.md
+progress.md
+findings.md
