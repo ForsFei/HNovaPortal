@@ -28,11 +28,11 @@ npm start
 
 ## 功能
 
-- Websites：名称、URL、描述、标签、Collection、收藏与 Alias；网格、筛选、搜索。
+- 网站：像 Edge 收藏夹一样用文件夹管理，支持文件夹嵌套、拖动归档、搜索、多选移动和拖动删除。添加网站只需名称与 URL，也可填写描述和图标并设置收藏。已有 Collection 会自动迁入同名文件夹。
 - 公开网站自动尝试 favicon，也可在编辑网站时填写图标 URL；加载失败时显示通用网站图标。
 - Services：设备与其服务、Host、端口、协议、路径和环境。
-- Imported：Chrome/Edge 本机资料发现与只读预览、HTML 书签预览、保守 URL 去重、导入历史、整理到 Websites/Private。
-- Private：使用主密码解锁后保存加密网址。
+- 已导入：Chrome/Edge 本机资料发现与只读预览、HTML 书签预览、保守 URL 去重和导入历史；书签按浏览器、资料和原有路径形成嵌套文件夹。支持多选后移至网站或私密的指定文件夹。
+- 私密：使用主密码解锁后保存加密网址，同样支持嵌套文件夹、拖动和批量管理。
 - Protected Area：Imported 与 Private 共用主密码和加密服务；手动锁定、5/10/30 分钟自动锁定；锁定时从搜索及组件状态中清除明文。
 - Ctrl+K：搜索网站、服务和当前已解锁的加密网址，也支持 Alias。
 - Light、Dark、System 主题。

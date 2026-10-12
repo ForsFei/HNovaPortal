@@ -31,8 +31,9 @@ async function profiles() {
   }
   return result;
 }
-function parseBookmarks(data: unknown, browser: Browser, profile: string): { entries: Entry[]; folders: number } {
+function parseBookmarks(data: unknown, browser: Browser, profile: string): { entries: Entry[]; folders: number; folderPaths: string[][] } {
   const entries: Entry[] = [];
+  const folderPaths: string[][] = [];
   let folders = 0;
   const root = data as { roots?: Record<string, unknown> };
   function visit(node: unknown, trail: string[]) {
@@ -43,11 +44,12 @@ function parseBookmarks(data: unknown, browser: Browser, profile: string): { ent
     } else if (item.type === "folder") {
       folders++;
       const next = item.name ? [...trail, item.name] : trail;
+      if (next.length) folderPaths.push(next);
       for (const child of item.children || []) visit(child, next);
     }
   }
   for (const node of Object.values(root.roots || {})) visit(node, []);
-  return { entries: entries.slice(0, 10000), folders };
+  return { entries: entries.slice(0, 10000), folders, folderPaths: folderPaths.slice(0, 10000) };
 }
 export async function GET(request: Request) {
   try { localRequest(request); return Response.json({ profiles: await profiles() }); }
