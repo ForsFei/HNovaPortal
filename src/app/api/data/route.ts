@@ -18,6 +18,17 @@ function folderDescendants(id: string) {
     UNION ALL SELECT child.id,tree.depth+1 FROM website_folders child JOIN tree ON child.parent_id = tree.id
   ) SELECT id,depth FROM tree ORDER BY depth DESC`).all(id) as { id: string; depth: number }[];
 }
+function trash(area: "website" | "imported" | "private", label: string, rows: { websites?: unknown[]; folders?: unknown[]; protectedRows?: unknown[] }) {
+  const count = (rows.websites?.length || 0) + (rows.folders?.length || 0) + (rows.protectedRows?.length || 0);
+  if (!count) return;
+  db.prepare("INSERT INTO trash_entries (id,area,label,count,payload,deleted_at) VALUES (?,?,?,?,?,?)")
+    .run(crypto.randomUUID(), area, label, count, JSON.stringify(rows), new Date().toISOString());
+}
+function nextOrder(parentId: string | null) {
+  const website = (db.prepare("SELECT COALESCE(MAX(sort_order),-1) AS max FROM websites WHERE folder_id IS ?").get(parentId) as { max: number }).max;
+  const folder = (db.prepare("SELECT COALESCE(MAX(sort_order),-1) AS max FROM website_folders WHERE parent_id IS ?").get(parentId) as { max: number }).max;
+  return Math.max(website, folder) + 1;
+}
 
 export async function GET(request: Request) {
   try { localRequest(request); return Response.json(snapshot()); }
@@ -37,20 +48,21 @@ export async function POST(request: Request) {
       const name = required(item.name, 160);
       const folderId = string(item.folderId, 80) || null;
       websiteFolder(folderId);
-      db.prepare(`INSERT INTO websites (id,name,url,description,icon,tags,collection,folder_id,favorite,alias,created_at)
-      VALUES (@id,@name,@url,@description,@icon,@tags,@collection,@folderId,@favorite,@alias,@createdAt)
-      ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,description=excluded.description,icon=excluded.icon,tags=excluded.tags,collection=excluded.collection,folder_id=excluded.folder_id,favorite=excluded.favorite,alias=excluded.alias`).run({
+      db.prepare(`INSERT INTO websites (id,name,url,description,icon,tags,collection,folder_id,sort_order,favorite,alias,created_at)
+      VALUES (@id,@name,@url,@description,@icon,@tags,@collection,@folderId,@sortOrder,@favorite,@alias,@createdAt)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,description=excluded.description,icon=excluded.icon,tags=excluded.tags,collection=excluded.collection,sort_order=CASE WHEN websites.folder_id IS excluded.folder_id THEN websites.sort_order ELSE excluded.sort_order END,folder_id=excluded.folder_id,favorite=excluded.favorite,alias=excluded.alias`).run({
         id, name, url, description: string(item.description, 1000), icon: string(item.icon, 2048) ? safeUrl(item.icon) : "",
-        tags: JSON.stringify(tags(item.tags)), collection: string(item.collection, 80), folderId, favorite: item.favorite ? 1 : 0,
+        tags: JSON.stringify(tags(item.tags)), collection: string(item.collection, 80), folderId, sortOrder: nextOrder(folderId), favorite: item.favorite ? 1 : 0,
         alias: string(item.alias, 80), createdAt: now
       });
     } else if (action === "website.delete") {
-      db.prepare("DELETE FROM websites WHERE id = ?").run(required(item.id, 80));
+      const websiteId = required(item.id, 80);
+      db.transaction(() => { const row = db.prepare("SELECT * FROM websites WHERE id = ?").get(websiteId); if (row) { trash("website", "1 个网站", { websites: [row] }); db.prepare("DELETE FROM websites WHERE id = ?").run(websiteId); } })();
     } else if (action === "website.bulkMove") {
       const folderId = string(item.folderId, 80) || null;
       websiteFolder(folderId);
-      const move = db.prepare("UPDATE websites SET folder_id = ? WHERE id = ?");
-      db.transaction(() => { for (const websiteId of ids(item.ids)) move.run(folderId, websiteId); })();
+      const move = db.prepare("UPDATE websites SET folder_id = ?, sort_order = ? WHERE id = ?");
+      db.transaction(() => { let order = nextOrder(folderId); for (const websiteId of ids(item.ids)) move.run(folderId, order++, websiteId); })();
     } else if (action === "website.bulkSave") {
       if (!Array.isArray(item.rows) || item.rows.length > 10000) throw new Error("网站数量无效");
       const rows = item.rows.map((row: Record<string, unknown>) => ({
@@ -59,12 +71,27 @@ export async function POST(request: Request) {
         folderId: string(row.folderId, 80) || null
       }));
       for (const row of rows) websiteFolder(row.folderId);
-      const save = db.prepare(`INSERT INTO websites (id,name,url,description,icon,tags,collection,folder_id,favorite,alias,created_at)
-        VALUES (@id,@name,@url,@description,@icon,'[]','',@folderId,0,'',@createdAt)`);
-      db.transaction(() => { for (const row of rows) save.run({ ...row, createdAt: now }); })();
+      const save = db.prepare(`INSERT INTO websites (id,name,url,description,icon,tags,collection,folder_id,sort_order,favorite,alias,created_at)
+        VALUES (@id,@name,@url,@description,@icon,'[]','',@folderId,@sortOrder,0,'',@createdAt)`);
+      db.transaction(() => { for (const row of rows) save.run({ ...row, sortOrder: nextOrder(row.folderId), createdAt: now }); })();
     } else if (action === "website.bulkDelete") {
       const remove = db.prepare("DELETE FROM websites WHERE id = ?");
-      db.transaction(() => { for (const websiteId of ids(item.ids)) remove.run(websiteId); })();
+      db.transaction(() => { const selected = ids(item.ids); const rows = selected.map(websiteId => db.prepare("SELECT * FROM websites WHERE id = ?").get(websiteId)).filter(Boolean); trash("website", `${rows.length} 个网站`, { websites: rows }); for (const websiteId of selected) remove.run(websiteId); })();
+    } else if (action === "bookmark.reorder") {
+      const folderId = string(item.folderId, 80) || null;
+      websiteFolder(folderId);
+      if (!Array.isArray(item.entries) || item.entries.length > 10000) throw new Error("排序项目无效");
+      const entries = item.entries.map((entry: { id?: unknown; type?: unknown }) => ({ id: required(entry.id, 80), type: entry.type === "folder" ? "folder" : entry.type === "items" ? "items" : null }));
+      if (entries.some((entry: { type: string | null }) => !entry.type)) throw new Error("排序类型无效");
+      const actual = [
+        ...(db.prepare("SELECT id FROM website_folders WHERE parent_id IS ?").all(folderId) as { id: string }[]).map(row => `folder:${row.id}`),
+        ...(db.prepare("SELECT id FROM websites WHERE folder_id IS ?").all(folderId) as { id: string }[]).map(row => `items:${row.id}`)
+      ];
+      const wanted = entries.map((entry: { type: string; id: string }) => `${entry.type}:${entry.id}`);
+      if (actual.length !== wanted.length || new Set(wanted).size !== actual.length || actual.some(value => !wanted.includes(value))) throw new Error("排序项目必须属于同一文件夹");
+      const updateFolder = db.prepare("UPDATE website_folders SET sort_order = ? WHERE id = ?");
+      const updateWebsite = db.prepare("UPDATE websites SET sort_order = ? WHERE id = ?");
+      db.transaction(() => { entries.forEach((entry: { type: string; id: string }, index: number) => (entry.type === "folder" ? updateFolder : updateWebsite).run(index, entry.id)); })();
     } else if (action === "folder.save") {
       const name = required(item.name, 160);
       const parentId = string(item.parentId, 80) || null;
@@ -72,15 +99,19 @@ export async function POST(request: Request) {
       const existing = db.prepare("SELECT id FROM website_folders WHERE id = ?").get(id);
       if (existing) {
         if (parentId && folderDescendants(id).some(folder => folder.id === parentId)) throw new Error("不能将文件夹移入自身或子文件夹");
-        db.prepare("UPDATE website_folders SET name = ?, parent_id = ? WHERE id = ?").run(name, parentId, id);
+        db.prepare("UPDATE website_folders SET name = ?, parent_id = ?, sort_order = CASE WHEN parent_id IS ? THEN sort_order ELSE ? END WHERE id = ?")
+          .run(name, parentId, parentId, nextOrder(parentId), id);
       } else {
-        db.prepare("INSERT INTO website_folders (id,name,parent_id,created_at) VALUES (?,?,?,?)").run(id, name, parentId, now);
+        db.prepare("INSERT INTO website_folders (id,name,parent_id,sort_order,created_at) VALUES (?,?,?,?,?)").run(id, name, parentId, nextOrder(parentId), now);
       }
     } else if (action === "folder.delete") {
       const descendants = folderDescendants(required(item.id, 80));
       const removeWebsite = db.prepare("DELETE FROM websites WHERE folder_id = ?");
       const removeFolder = db.prepare("DELETE FROM website_folders WHERE id = ?");
       db.transaction(() => {
+        const folderRows = descendants.map(folder => db.prepare("SELECT * FROM website_folders WHERE id = ?").get(folder.id));
+        const websiteRows = descendants.flatMap(folder => db.prepare("SELECT * FROM websites WHERE folder_id = ?").all(folder.id));
+        trash("website", `${descendants.length} 个文件夹及内容`, { folders: folderRows, websites: websiteRows });
         for (const folder of descendants) removeWebsite.run(folder.id);
         for (const folder of descendants) removeFolder.run(folder.id);
       })();
@@ -135,10 +166,37 @@ export async function POST(request: Request) {
       ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,payload=excluded.payload,nonce=excluded.nonce`);
       db.transaction(() => { for (const row of rows) write.run(row.id, row.kind, row.payload, row.nonce, now); })();
     } else if (action === "protected.delete") {
-      db.prepare("DELETE FROM protected_items WHERE id = ?").run(required(item.id, 80));
+      const protectedId = required(item.id, 80);
+      db.transaction(() => { const row = db.prepare("SELECT * FROM protected_items WHERE id = ?").get(protectedId) as { kind: "imported" | "private" } | undefined; if (row) { trash(row.kind, "1 个加密项目", { protectedRows: [row] }); db.prepare("DELETE FROM protected_items WHERE id = ?").run(protectedId); } })();
     } else if (action === "protected.deleteMany") {
       const remove = db.prepare("DELETE FROM protected_items WHERE id = ?");
+      db.transaction(() => { const selected = ids(item.ids); const rows = selected.map(protectedId => db.prepare("SELECT * FROM protected_items WHERE id = ?").get(protectedId)).filter(Boolean) as { kind: "imported" | "private" }[]; trash(rows[0]?.kind || "private", `${rows.length} 个加密项目`, { protectedRows: rows }); for (const protectedId of selected) remove.run(protectedId); })();
+    } else if (action === "protected.removeMany") {
+      const remove = db.prepare("DELETE FROM protected_items WHERE id = ?");
       db.transaction(() => { for (const protectedId of ids(item.ids)) remove.run(protectedId); })();
+    } else if (action === "trash.restore") {
+      const trashId = required(item.id, 80);
+      db.transaction(() => {
+        const entry = db.prepare("SELECT payload FROM trash_entries WHERE id = ?").get(trashId) as { payload: string } | undefined;
+        if (!entry) throw new Error("回收站项目不存在");
+        const payload = JSON.parse(entry.payload) as { folders?: Record<string, unknown>[]; websites?: Record<string, unknown>[]; protectedRows?: Record<string, unknown>[] };
+        const folders = payload.folders || [], websites = payload.websites || [], protectedRows = payload.protectedRows || [];
+        for (const row of [...folders, ...websites, ...protectedRows]) if (db.prepare(`SELECT 1 FROM ${folders.includes(row) ? "website_folders" : websites.includes(row) ? "websites" : "protected_items"} WHERE id = ?`).get(row.id)) throw new Error("原位置已有同 ID 项目，无法恢复");
+        for (const row of folders.reverse()) {
+          if (row.parent_id && !db.prepare("SELECT 1 FROM website_folders WHERE id = ?").get(row.parent_id)) row.parent_id = null;
+          db.prepare("INSERT INTO website_folders (id,parent_id,name,sort_order,created_at) VALUES (@id,@parent_id,@name,@sort_order,@created_at)").run(row);
+        }
+        for (const row of websites) {
+          if (row.folder_id && !db.prepare("SELECT 1 FROM website_folders WHERE id = ?").get(row.folder_id)) row.folder_id = null;
+          db.prepare("INSERT INTO websites (id,name,url,description,icon,tags,collection,folder_id,sort_order,favorite,alias,created_at) VALUES (@id,@name,@url,@description,@icon,@tags,@collection,@folder_id,@sort_order,@favorite,@alias,@created_at)").run(row);
+        }
+        for (const row of protectedRows) db.prepare("INSERT INTO protected_items (id,kind,payload,nonce,crypto_version,created_at) VALUES (@id,@kind,@payload,@nonce,@crypto_version,@created_at)").run(row);
+        db.prepare("DELETE FROM trash_entries WHERE id = ?").run(trashId);
+      })();
+    } else if (action === "trash.purge") {
+      db.prepare("DELETE FROM trash_entries WHERE id = ?").run(required(item.id, 80));
+    } else if (action === "trash.empty") {
+      db.prepare("DELETE FROM trash_entries").run();
     } else if (action === "batch.save") {
       db.prepare("INSERT INTO import_batches (id,source,scanned,added,skipped,imported_at) VALUES (?,?,?,?,?,?)").run(
         id, required(item.source, 60), Number(item.scanned) || 0, Number(item.added) || 0, Number(item.skipped) || 0, now

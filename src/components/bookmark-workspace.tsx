@@ -4,8 +4,8 @@ import { useEffect, useState } from "react";
 import { ChevronRight, ExternalLink, Folder, FolderPlus, Globe2, Heart, KeyRound, MoreHorizontal, Search, Trash2 } from "lucide-react";
 import SiteIcon from "@/components/site-icon";
 
-export type FolderEntry = { id: string; name: string; parentId: string | null };
-export type LinkEntry = { id: string; name: string; url: string; description?: string; icon?: string; folderId?: string | null; favorite?: boolean };
+export type FolderEntry = { id: string; name: string; parentId: string | null; sortOrder?: number; createdAt?: string };
+export type LinkEntry = { id: string; name: string; url: string; description?: string; icon?: string; folderId?: string | null; sortOrder?: number; createdAt?: string; favorite?: boolean };
 type Area = "website" | "imported" | "private";
 type Transfer = { folders: Record<"website" | "private", FolderEntry[]>; move: (ids: string[], target: "website" | "private", folderId: string | null) => Promise<void> };
 type Props = {
@@ -16,6 +16,7 @@ type Props = {
   onDeleteFolder: (id: string) => Promise<void>;
   onMoveItems: (ids: string[], folderId: string | null) => Promise<void>;
   onDeleteItems: (ids: string[]) => Promise<void>;
+  onReorder: (entries: { id: string; type: "items" | "folder" }[], parentId: string | null) => Promise<void>;
   onAddItem?: (folderId: string | null) => void;
   onEditItem?: (item: LinkEntry) => void;
   onToggleFavorite?: (item: LinkEntry) => void;
@@ -44,8 +45,13 @@ export default function BookmarkWorkspace(props: Props) {
 
   const currentName = folders.find(folder => folder.id === current)?.name || labels[area];
   const matching = (item: LinkEntry) => `${item.name} ${item.url} ${item.description || ""}`.toLowerCase().includes(search.toLowerCase());
-  const visibleItems = items.filter(item => search ? matching(item) : (item.folderId || null) === current);
-  const visibleFolders = search ? folders.filter(folder => folder.name.toLowerCase().includes(search.toLowerCase())) : folders.filter(folder => folder.parentId === current);
+  const byOrder = <T extends { sortOrder?: number; createdAt?: string; name: string }>(left: T, right: T) => (left.sortOrder ?? 0) - (right.sortOrder ?? 0) || (left.createdAt || "").localeCompare(right.createdAt || "") || left.name.localeCompare(right.name, "zh-CN");
+  const visibleItems = items.filter(item => search ? matching(item) : (item.folderId || null) === current).sort(byOrder);
+  const visibleFolders = folders.filter(folder => search ? folder.name.toLowerCase().includes(search.toLowerCase()) : folder.parentId === current).sort(byOrder);
+  const visibleEntries = [
+    ...visibleFolders.map(value => ({ type: "folder" as const, value })),
+    ...visibleItems.map(value => ({ type: "items" as const, value }))
+  ].sort((left, right) => byOrder(left.value, right.value));
   const allVisibleSelected = visibleItems.length > 0 && visibleItems.every(item => selected.includes(item.id));
   const toggleVisible = () => setSelected(previous => allVisibleSelected ? previous.filter(id => !visibleItems.some(item => item.id === id)) : [...new Set([...previous, ...visibleItems.map(item => item.id)])]);
   const toggle = (id: string) => setSelected(previous => previous.includes(id) ? previous.filter(value => value !== id) : [...previous, id]);
@@ -96,16 +102,30 @@ export default function BookmarkWorkspace(props: Props) {
     if (payload.type === "items") deleteItems(payload.ids);
     else { const folder = folders.find(value => value.id === payload.ids[0]); if (folder) deleteFolder(folder); }
   };
+  const reorder = (event: React.DragEvent, targetId: string) => {
+    event.preventDefault(); event.stopPropagation(); setDragOver(null);
+    if (search) return;
+    const payload = dragged(event);
+    if (!payload || payload.area !== area || payload.ids.includes(targetId)) return;
+    if (payload.ids.some(id => !visibleEntries.some(entry => entry.type === payload.type && entry.value.id === id))) return;
+    const moving = visibleEntries.filter(entry => entry.type === payload.type && payload.ids.includes(entry.value.id));
+    const order = visibleEntries.filter(entry => !moving.includes(entry));
+    order.splice(order.findIndex(entry => entry.value.id === targetId), 0, ...moving);
+    void run(() => props.onReorder(order.map(entry => ({ id: entry.value.id, type: entry.type })), current), "顺序已保存");
+  };
+  const sortByName = () => {
+    void run(() => props.onReorder([...visibleEntries].sort((left, right) => left.value.name.localeCompare(right.value.name, "zh-CN")).map(entry => ({ id: entry.value.id, type: entry.type })), current), "已按名称排序");
+  };
   const dropHandlers = (id: string | null) => ({
     onDragOver: (event: React.DragEvent) => { event.preventDefault(); setDragOver(id || "root"); },
     onDragLeave: () => setDragOver(null),
     onDrop: (event: React.DragEvent) => dropOn(event, id)
   });
-  const folderOptions = (source: FolderEntry[], parentId: string | null = null, depth = 0, seen = new Set<string>()): React.ReactNode[] => source.filter(folder => folder.parentId === parentId && !seen.has(folder.id)).flatMap(folder => {
+  const folderOptions = (source: FolderEntry[], parentId: string | null = null, depth = 0, seen = new Set<string>()): React.ReactNode[] => source.filter(folder => folder.parentId === parentId && !seen.has(folder.id)).sort(byOrder).flatMap(folder => {
     const next = new Set(seen); next.add(folder.id);
     return [<option key={folder.id} value={folder.id}>{"　".repeat(depth)}{folder.name}</option>, ...folderOptions(source, folder.id, depth + 1, next)];
   });
-  const tree = (parentId: string | null = null, depth = 0, seen = new Set<string>()): React.ReactNode[] => folders.filter(folder => folder.parentId === parentId && !seen.has(folder.id)).flatMap(folder => {
+  const tree = (parentId: string | null = null, depth = 0, seen = new Set<string>()): React.ReactNode[] => folders.filter(folder => folder.parentId === parentId && !seen.has(folder.id)).sort(byOrder).flatMap(folder => {
     const next = new Set(seen); next.add(folder.id);
     return [<div key={folder.id}>
       <div className={`folder-tree-node ${current === folder.id ? "active" : ""} ${dragOver === folder.id ? "drop-active" : ""}`} style={{ paddingLeft: 12 + depth * 15 }}
@@ -135,7 +155,7 @@ export default function BookmarkWorkspace(props: Props) {
     </aside>
     <section className="folder-content">
       <div className="folder-toolbar"><div className="folder-breadcrumb"><button {...dropHandlers(null)} onClick={() => setCurrent(null)}>{labels[area]}</button>{crumbs.map(folder => <span key={folder.id}><ChevronRight size={13}/><button {...dropHandlers(folder.id)} onClick={() => setCurrent(folder.id)}>{folder.name}</button></span>)}</div><div className="folder-actions"><button onClick={createFolder}><FolderPlus size={15}/> 添加文件夹</button>{props.onAddItem && <button onClick={() => props.onAddItem!(current)}><Globe2 size={15}/> 添加{area === "website" ? "网站" : "网址"}</button>}</div></div>
-      <div className="folder-search"><Search size={16}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder={`搜索${labels[area]}...`}/></div>
+      <div className="folder-search"><Search size={16}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder={`搜索${labels[area]}...`}/>{!search && <button type="button" onClick={sortByName} disabled={busy}>按名称排序</button>}</div>
       {selected.length > 0 && <div className="folder-selection"><strong>已选 {selected.length} 项</strong><button onClick={() => setSelected([])}>取消选择</button>
         <select value={moveFolderId} onChange={event => setMoveFolderId(event.target.value)}><option value="">移动到根目录</option>{folderOptions(folders)}</select><button disabled={busy} onClick={() => moveItems(selected, moveFolderId || null)}>移动</button>
         {props.transfer && <><select value={targetArea} onChange={event => setTargetArea(event.target.value as "website" | "private")}><option value="website">移至网站</option><option value="private">移至私密</option></select><select value={transferFolderId} onChange={event => setTransferFolderId(event.target.value)}><option value="">目标根目录</option>{folderOptions(props.transfer.folders[targetArea])}</select><button disabled={busy} onClick={() => void run(async () => { await props.transfer!.move(selected, targetArea, transferFolderId || null); setSelected([]); }, "已移动")}>批量移至</button></>}
@@ -143,21 +163,20 @@ export default function BookmarkWorkspace(props: Props) {
       </div>}
       <div className="folder-list-heading"><span>{currentName}</span><small>{visibleFolders.length} 个文件夹 · {visibleItems.length} 个网址</small>{visibleItems.length > 0 && <label className="folder-select-all"><input type="checkbox" checked={allVisibleSelected} onChange={toggleVisible}/> 全选当前网址</label>}</div>
       <div className="folder-list">
-        {visibleFolders.map(folder => <div key={folder.id} className={`folder-list-row ${dragOver === folder.id ? "drop-active" : ""}`} draggable onDragStart={event => startDrag(event, { area, type: "folder", ids: [folder.id] })} {...dropHandlers(folder.id)}>
+        {visibleEntries.map(entry => entry.type === "folder" ? (() => { const folder = entry.value as FolderEntry; return <div key={`folder-${folder.id}`} className={`folder-list-row ${dragOver === folder.id ? "drop-active" : ""}`} draggable onDragStart={event => startDrag(event, { area, type: "folder", ids: [folder.id] })} {...dropHandlers(folder.id)} onDrop={event => { const payload = dragged(event); if (payload?.ids.every(id => visibleEntries.some(value => value.type === payload.type && value.value.id === id))) reorder(event, folder.id); else dropOn(event, folder.id); }}>
           <button className="folder-list-open" onClick={() => { setCurrent(folder.id); setSearch(""); }}><span className="folder-list-icon"><Folder size={19}/></span><strong>{folder.name}</strong><ChevronRight size={16}/></button>
           <button title="重命名" onClick={() => renameFolder(folder)}><MoreHorizontal size={16}/></button><button title="删除文件夹" onClick={() => deleteFolder(folder)}><Trash2 size={15}/></button>
-        </div>)}
-        {visibleItems.map(item => <div key={item.id} className={`folder-list-row link-row ${selected.includes(item.id) ? "selected" : ""}`} draggable onDragStart={event => { const ids = selected.includes(item.id) ? selected : [item.id]; setSelected(ids); startDrag(event, { area, type: "items", ids }); }}>
+        </div>; })() : (() => { const item = entry.value as LinkEntry; return <div key={`item-${item.id}`} className={`folder-list-row link-row ${selected.includes(item.id) ? "selected" : ""} ${dragOver === item.id ? "drop-active" : ""}`} draggable onDragStart={event => { const ids = selected.includes(item.id) ? selected : [item.id]; setSelected(ids); startDrag(event, { area, type: "items", ids }); }} onDragOver={event => { event.preventDefault(); setDragOver(item.id); }} onDrop={event => reorder(event, item.id)}>
           <input type="checkbox" aria-label={`选择 ${item.name}`} checked={selected.includes(item.id)} onChange={() => toggle(item.id)}/>
           {area === "website" ? <SiteIcon url={item.url} icon={item.icon} className="mini-icon"/> : <span className="mini-icon">{area === "private" ? <KeyRound size={16}/> : <Globe2 size={16}/>}</span>}
           <a href={item.url} target="_blank" rel="noopener noreferrer"><strong>{item.name}</strong><small>{item.description || item.url}</small></a>
           {props.onToggleFavorite && <button title={item.favorite ? "取消收藏" : "收藏"} onClick={() => props.onToggleFavorite!(item)}><Heart size={16} fill={item.favorite ? "currentColor" : "none"}/></button>}
           {props.onEditItem && <button title="编辑" onClick={() => props.onEditItem!(item)}><MoreHorizontal size={16}/></button>}
           <ExternalLink size={14}/>
-        </div>)}
+        </div>; })())}
         {!visibleFolders.length && !visibleItems.length && <div className="folder-empty">{search ? "没有找到匹配的内容" : "这个文件夹还没有内容，可添加文件夹或网址。"}</div>}
       </div>
-      <div className={`folder-trash ${dragOver === "trash" ? "drop-active" : ""}`} onDragOver={event => { event.preventDefault(); setDragOver("trash"); }} onDragLeave={() => setDragOver(null)} onDrop={dropDelete}><Trash2 size={16}/> 拖到这里删除选中项目或文件夹</div>
+      <div className={`folder-trash ${dragOver === "trash" ? "drop-active" : ""}`} onDragOver={event => { event.preventDefault(); setDragOver("trash"); }} onDragLeave={() => setDragOver(null)} onDrop={dropDelete}><Trash2 size={16}/> 拖到这里删除；拖到同层项目上排序，拖到左侧文件夹中归档</div>
     </section>
   </div>;
 }

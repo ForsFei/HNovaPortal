@@ -3,11 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-export type Website = { id: string; name: string; url: string; description: string; icon: string; tags: string[]; collection: string; folderId: string | null; favorite: boolean; alias: string; createdAt: string };
-export type WebsiteFolder = { id: string; name: string; parentId: string | null; createdAt: string };
+export type Website = { id: string; name: string; url: string; description: string; icon: string; tags: string[]; collection: string; folderId: string | null; sortOrder: number; favorite: boolean; alias: string; createdAt: string };
+export type WebsiteFolder = { id: string; name: string; parentId: string | null; sortOrder: number; createdAt: string };
 export type Server = { id: string; name: string; host: string; environment: string; description: string; createdAt: string };
 export type Service = { id: string; serverId: string | null; name: string; host: string; port: number | null; protocol: "http" | "https"; path: string; description: string; tags: string[]; environment: string; alias: string; createdAt: string };
 export type ProtectedRow = { id: string; kind: "imported" | "private"; payload: string; nonce: string; version: number; createdAt: string };
+export type TrashEntry = { id: string; area: "website" | "imported" | "private"; label: string; count: number; deletedAt: string };
 
 const databasePath = process.env.HNOVA_DB_PATH || path.join(process.cwd(), "data", "portal.db");
 fs.mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -47,6 +48,10 @@ CREATE TABLE IF NOT EXISTS import_batches (
   skipped INTEGER NOT NULL, imported_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS trash_entries (
+  id TEXT PRIMARY KEY, area TEXT NOT NULL, label TEXT NOT NULL, count INTEGER NOT NULL,
+  payload TEXT NOT NULL, deleted_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_protected_kind ON protected_items(kind);
 CREATE INDEX IF NOT EXISTS idx_websites_collection ON websites(collection);
 CREATE INDEX IF NOT EXISTS idx_website_folders_parent ON website_folders(parent_id);
@@ -55,6 +60,8 @@ CREATE INDEX IF NOT EXISTS idx_website_folders_parent ON website_folders(parent_
 if (!(db.pragma("table_info(websites)") as { name: string }[]).some(column => column.name === "folder_id")) {
   db.exec("ALTER TABLE websites ADD COLUMN folder_id TEXT");
 }
+if (!(db.pragma("table_info(websites)") as { name: string }[]).some(column => column.name === "sort_order")) db.exec("ALTER TABLE websites ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0");
+if (!(db.pragma("table_info(website_folders)") as { name: string }[]).some(column => column.name === "sort_order")) db.exec("ALTER TABLE website_folders ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0");
 db.exec("CREATE INDEX IF NOT EXISTS idx_websites_folder ON websites(folder_id)");
 const migrateCollections = db.transaction(() => {
   if (db.prepare("SELECT 1 FROM schema_migrations WHERE name = ?").get("website_collections_to_folders")) return;
@@ -72,12 +79,12 @@ const migrateCollections = db.transaction(() => {
 migrateCollections();
 
 export function snapshot() {
-  const websites = (db.prepare("SELECT * FROM websites ORDER BY favorite DESC, created_at DESC").all() as Record<string, unknown>[]).map(row => ({
+  const websites = (db.prepare("SELECT * FROM websites ORDER BY sort_order, created_at, id").all() as Record<string, unknown>[]).map(row => ({
     id: row.id, name: row.name, url: row.url, description: row.description, icon: row.icon,
-    tags: JSON.parse(row.tags as string), collection: row.collection, folderId: row.folder_id, favorite: !!row.favorite,
+    tags: JSON.parse(row.tags as string), collection: row.collection, folderId: row.folder_id, sortOrder: row.sort_order, favorite: !!row.favorite,
     alias: row.alias, createdAt: row.created_at
   })) as Website[];
-  const websiteFolders = db.prepare("SELECT id,name,parent_id AS parentId,created_at AS createdAt FROM website_folders ORDER BY name").all() as WebsiteFolder[];
+  const websiteFolders = db.prepare("SELECT id,name,parent_id AS parentId,sort_order AS sortOrder,created_at AS createdAt FROM website_folders ORDER BY sort_order,created_at,id").all() as WebsiteFolder[];
   const servers = (db.prepare("SELECT * FROM servers ORDER BY name").all() as Record<string, unknown>[]).map(row => ({
     id: row.id, name: row.name, host: row.host, environment: row.environment, description: row.description, createdAt: row.created_at
   })) as Server[];
@@ -91,7 +98,8 @@ export function snapshot() {
   })) as ProtectedRow[];
   const vault = db.prepare("SELECT salt, verifier_payload AS verifierPayload, verifier_nonce AS verifierNonce, crypto_version AS version FROM vault WHERE id = 1").get();
   const batches = db.prepare("SELECT id, source, scanned, added, skipped, imported_at AS importedAt FROM import_batches ORDER BY imported_at DESC LIMIT 30").all();
-  return { websites, websiteFolders, servers, services, protectedRows, vault: vault || null, batches };
+  const trash = db.prepare("SELECT id,area,label,count,deleted_at AS deletedAt FROM trash_entries ORDER BY deleted_at DESC,rowid DESC").all() as TrashEntry[];
+  return { websites, websiteFolders, servers, services, protectedRows, vault: vault || null, batches, trash };
 }
 
 export default db;

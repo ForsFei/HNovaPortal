@@ -6,11 +6,11 @@ export type Cipher = { payload: string; nonce: string };
 export type SecretItem = {
   id: string; kind: "imported" | "private"; name: string; url: string; description?: string;
   notes?: string; tags?: string[]; collection?: string; browser?: string; profile?: string;
-  folder?: string; folderId?: string | null; createdAt?: string
+  folder?: string; folderId?: string | null; sortOrder?: number; createdAt?: string
 };
 export type SecretFolder = {
   id: string; kind: "imported" | "private"; nodeType: "folder"; name: string;
-  parentId: string | null; createdAt?: string
+  parentId: string | null; sortOrder?: number; createdAt?: string
 };
 export type SecretNode = SecretItem | SecretFolder;
 const encoder = new TextEncoder();

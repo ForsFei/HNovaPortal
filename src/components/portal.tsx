@@ -2,19 +2,20 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowDownToLine, ArrowRight, Check, ChevronDown, Command, Compass, ExternalLink, FileUp, Globe2, HardDrive, Heart, Home, KeyRound, LayoutGrid, LockKeyhole, Menu, Moon, MoreHorizontal, Plus, Search, Server as ServerIcon, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, Sun, Trash2, X } from "lucide-react";
-import type { ProtectedRow, Server, Service, Website, WebsiteFolder } from "@/lib/db";
+import type { ProtectedRow, Server, Service, TrashEntry, Website, WebsiteFolder } from "@/lib/db";
 import { decrypt, deriveKey, encrypt, newSalt, type SecretFolder, type SecretItem, verifier } from "@/lib/vault";
 import { decodeNodes, migrateLegacyFolders, type EncryptedWrite } from "@/lib/protected-folders";
 import { normalizeUrl } from "@/lib/validation";
 import ServiceRow from "@/components/service-row";
 import SiteIcon from "@/components/site-icon";
 import BookmarkWorkspace from "@/components/bookmark-workspace";
+import { bookmarksHtml } from "@/lib/bookmarks-html";
 
 type Section = "Home" | "Websites" | "Imported" | "Private" | "Services" | "Settings";
-type Snapshot = { websites: Website[]; websiteFolders: WebsiteFolder[]; servers: Server[]; services: Service[]; protectedRows: ProtectedRow[]; vault: { salt: string; verifierPayload: string; verifierNonce: string; version: number } | null; batches: { id: string; source: string; scanned: number; added: number; skipped: number; importedAt: string }[] };
+type Snapshot = { websites: Website[]; websiteFolders: WebsiteFolder[]; servers: Server[]; services: Service[]; protectedRows: ProtectedRow[]; vault: { salt: string; verifierPayload: string; verifierNonce: string; version: number } | null; batches: { id: string; source: string; scanned: number; added: number; skipped: number; importedAt: string }[]; trash: TrashEntry[] };
 type ImportEntry = { name: string; url: string; folder: string; browser: string; profile: string };
 type Profile = { browser: string; profile: string; label: string };
-const empty: Snapshot = { websites: [], websiteFolders: [], servers: [], services: [], protectedRows: [], vault: null, batches: [] };
+const empty: Snapshot = { websites: [], websiteFolders: [], servers: [], services: [], protectedRows: [], vault: null, batches: [], trash: [] };
 const icons = { Home, Websites: Globe2, Imported: ArrowDownToLine, Private: LockKeyhole, Services: ServerIcon, Settings: Settings2 };
 const nav: Section[] = ["Home", "Websites", "Imported", "Private", "Services", "Settings"];
 const sectionLabels: Record<Section, string> = { Home: "首页", Websites: "网站", Imported: "已导入", Private: "私密", Services: "服务", Settings: "设置" };
@@ -51,6 +52,9 @@ export default function Portal() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
+  const [undoId, setUndoId] = useState<string | null>(null);
+  const [backupInput, setBackupInput] = useState<unknown>(null);
+  const [backupPreview, setBackupPreview] = useState<{ exportedAt: string; counts: Record<string, number> } | null>(null);
   const [theme, setTheme] = useState<"dark" | "light" | "system">("system");
   const [modal, setModal] = useState<"website" | "server" | "service" | "private" | "import" | "unlock" | null>(null);
   const [editing, setEditing] = useState<Record<string, unknown> | null>(null);
@@ -67,8 +71,36 @@ export default function Portal() {
   const [duplicateMode, setDuplicateMode] = useState<"skip" | "keep" | "merge">("skip");
   const [busy, setBusy] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
+  const toastTimer = useRef<number | null>(null);
 
-  const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 3600); };
+  const notify = (message: string) => { if (toastTimer.current) clearTimeout(toastTimer.current); setToast(message); toastTimer.current = window.setTimeout(() => { setToast(""); setUndoId(null); }, 5000); };
+  const markTrash = (next: Snapshot) => setUndoId(next.trash[0]?.id || null);
+  const download = (blob: Blob, filename: string) => { const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000); };
+  const exportBackup = async () => {
+    try { const res = await fetch("/api/backup", { cache: "no-store" }); if (!res.ok) throw new Error("备份失败"); download(await res.blob(), `HNovaPortal-${new Date().toISOString().slice(0, 10)}.json`); notify("完整备份已下载"); }
+    catch (error) { notify((error as Error).message); }
+  };
+  const previewBackup = async (file: File) => {
+    try {
+      if (file.size > 64 * 1024 * 1024) throw new Error("备份文件超过 64 MB");
+      const backup = JSON.parse(await file.text()) as unknown;
+      const res = await fetch("/api/backup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "preview", backup }) });
+      const result = await res.json(); if (!res.ok) throw new Error(result.error);
+      setBackupInput(backup); setBackupPreview(result);
+    } catch (error) { setBackupInput(null); setBackupPreview(null); notify((error as Error).message); }
+  };
+  const restoreBackup = async () => {
+    if (!backupInput || !backupPreview || !confirm("这会用备份替换当前门户的所有数据和保险库。确定继续？")) return;
+    try {
+      setBusy(true);
+      const res = await fetch("/api/backup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "restore", backup: backupInput }) });
+      const result = await res.json(); if (!res.ok) throw new Error(result.error);
+      lock(); await refresh(); setBackupInput(null); setBackupPreview(null); setUndoId(null); notify("备份已恢复，请重新解锁私密区域");
+    } catch (error) { notify((error as Error).message); } finally { setBusy(false); }
+  };
+  const exportBookmarks = () => { download(new Blob([bookmarksHtml(data.websiteFolders, data.websites)], { type: "text/html;charset=utf-8" }), `HNovaPortal-书签-${new Date().toISOString().slice(0, 10)}.html`); notify("网站书签已导出"); };
+  const restoreTrash = async (id: string) => { try { await mutate("trash.restore", { id }); setUndoId(null); notify("已恢复"); } catch (error) { notify((error as Error).message); } };
+  const purgeTrash = async (id: string) => { if (!confirm("永久删除此项目？此操作无法撤销。")) return; try { await mutate("trash.purge", { id }); notify("已永久删除"); } catch (error) { notify((error as Error).message); } };
   const refresh = useCallback(async () => {
     const res = await fetch("/api/data", { cache: "no-store" });
     if (!res.headers.get("content-type")?.includes("application/json")) throw new Error("数据接口未就绪，请检查启动窗口中的构建结果，确认下载包包含 src/app/api/data/route.ts");
@@ -149,11 +181,13 @@ export default function Portal() {
   const openForm = (type: typeof modal, item: Record<string, unknown> | null = null) => { setEditing(item); setModal(type); };
   const doDelete = async (action: string, id: string) => {
     if (!confirm("确定删除此项目？")) return;
-    try { await mutate(action, { id }); notify("已删除"); } catch (e) { notify((e as Error).message); }
+    try { markTrash(await mutate(action, { id })); notify("已移到回收站"); } catch (e) { notify((e as Error).message); }
   };
   const saveSecret = async (item: SecretItem) => {
     if (!keyRef.current) throw new Error("请先解锁保险库");
-    const cipher = await encrypt(keyRef.current, item);
+    const existing = secrets.find(value => value.id === item.id);
+    const next = existing ? item : { ...item, createdAt: item.createdAt || new Date().toISOString(), sortOrder: protectedNextOrder(item.kind, item.folderId || null) };
+    const cipher = await encrypt(keyRef.current, next);
     await mutate("protected.save", { id: item.id, kind: item.kind, ...cipher });
   };
   const saveForm = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -287,15 +321,18 @@ export default function Portal() {
       }));
       await saveProtectedRows(rows as EncryptedWrite[]);
     }
-    await mutate("protected.deleteMany", { ids: items.map(item => item.id) });
+    await mutate("protected.removeMany", { ids: items.map(item => item.id) });
   };
   type BookmarkArea = "website" | "imported" | "private";
   const areaFolders = (area: BookmarkArea) => area === "website" ? data.websiteFolders : secretFolders.filter(folder => folder.kind === area);
+  const protectedNextOrder = (area: "imported" | "private", parentId: string | null) => Math.max(-1,
+    ...secretFolders.filter(value => value.kind === area && value.parentId === parentId).map(value => value.sortOrder ?? 0),
+    ...secrets.filter(value => value.kind === area && (value.folderId || null) === parentId).map(value => value.sortOrder ?? 0)) + 1;
   const createFolder = async (area: BookmarkArea, name: string, parentId: string | null) => {
     if (area === "website") { await mutate("folder.save", { name, parentId }); return; }
     if (!keyRef.current) throw new Error("请先解锁保险库");
     if (parentId && !areaFolders(area).some(folder => folder.id === parentId)) throw new Error("目标文件夹不存在");
-    const folder: SecretFolder = { id: crypto.randomUUID(), kind: area, nodeType: "folder", name, parentId, createdAt: new Date().toISOString() };
+    const folder: SecretFolder = { id: crypto.randomUUID(), kind: area, nodeType: "folder", name, parentId, sortOrder: protectedNextOrder(area, parentId), createdAt: new Date().toISOString() };
     await mutate("protected.save", { id: folder.id, kind: area, ...await encrypt(keyRef.current, folder) });
   };
   const renameFolder = async (area: BookmarkArea, id: string, name: string) => {
@@ -319,26 +356,38 @@ export default function Portal() {
     if (!folder || !keyRef.current) throw new Error("文件夹不存在或保护区已锁定");
     if (parentId && !areaFolders(area).some(value => value.id === parentId)) throw new Error("目标文件夹不存在");
     if (parentId && protectedDescendants(area, id).has(parentId)) throw new Error("不能将文件夹移入自身或子文件夹");
-    await mutate("protected.save", { id, kind: area, ...await encrypt(keyRef.current, { ...folder, parentId }) });
+    const sortOrder = parentId === folder.parentId ? folder.sortOrder : protectedNextOrder(area, parentId);
+    await mutate("protected.save", { id, kind: area, ...await encrypt(keyRef.current, { ...folder, parentId, sortOrder }) });
   };
   const deleteFolder = async (area: BookmarkArea, id: string) => {
-    if (area === "website") { await mutate("folder.delete", { id }); return; }
+    if (area === "website") { markTrash(await mutate("folder.delete", { id })); return; }
     if (!secretFolders.some(folder => folder.id === id && folder.kind === area)) throw new Error("文件夹不存在");
     const descendants = protectedDescendants(area, id);
     const itemIds = secrets.filter(item => item.kind === area && item.folderId && descendants.has(item.folderId)).map(item => item.id);
-    await mutate("protected.deleteMany", { ids: [...descendants, ...itemIds] });
+    markTrash(await mutate("protected.deleteMany", { ids: [...descendants, ...itemIds] }));
   };
   const moveItems = async (area: BookmarkArea, ids: string[], folderId: string | null) => {
     if (area === "website") { await mutate("website.bulkMove", { ids, folderId }); return; }
     if (!keyRef.current) throw new Error("请先解锁保险库");
     if (folderId && !areaFolders(area).some(folder => folder.id === folderId)) throw new Error("目标文件夹不存在");
-    const rows = await Promise.all(secrets.filter(item => item.kind === area && ids.includes(item.id)).map(async item => ({
-      id: item.id, kind: item.kind, ...await encrypt(keyRef.current!, { ...item, folderId })
+    const start = protectedNextOrder(area, folderId);
+    const rows = await Promise.all(secrets.filter(item => item.kind === area && ids.includes(item.id)).map(async (item, index) => ({
+      id: item.id, kind: item.kind, ...await encrypt(keyRef.current!, { ...item, folderId, sortOrder: start + index })
     })));
     await saveProtectedRows(rows);
   };
+  const reorder = async (area: BookmarkArea, entries: { id: string; type: "items" | "folder" }[], parentId: string | null) => {
+    if (area === "website") { await mutate("bookmark.reorder", { entries, folderId: parentId }); return; }
+    if (!keyRef.current) throw new Error("请先解锁保险库");
+    const folders = areaFolders(area).filter(value => value.parentId === parentId).map(value => ({ type: "folder" as const, value }));
+    const items = secrets.filter(value => value.kind === area && (value.folderId || null) === parentId).map(value => ({ type: "items" as const, value }));
+    const nodes = [...folders, ...items];
+    if (nodes.length !== entries.length || new Set(entries.map(entry => `${entry.type}:${entry.id}`)).size !== entries.length || nodes.some(node => !entries.some(entry => entry.type === node.type && entry.id === node.value.id))) throw new Error("排序项目必须属于同一文件夹");
+    const rows = await Promise.all(entries.map(async (entry, index) => { const node = nodes.find(value => value.type === entry.type && value.value.id === entry.id)!.value; return { id: entry.id, kind: area, ...await encrypt(keyRef.current!, { ...node, sortOrder: index }) }; }));
+    await saveProtectedRows(rows);
+  };
   const deleteItems = async (area: BookmarkArea, ids: string[]) => {
-    await mutate(area === "website" ? "website.bulkDelete" : "protected.deleteMany", { ids });
+    markTrash(await mutate(area === "website" ? "website.bulkDelete" : "protected.deleteMany", { ids }));
   };
   const allSearch = useMemo(() => {
     const publicItems = [
@@ -384,6 +433,7 @@ export default function Portal() {
             onDeleteFolder={id => deleteFolder("website", id)}
             onMoveItems={(ids, folderId) => moveItems("website", ids, folderId)}
             onDeleteItems={ids => deleteItems("website", ids)}
+            onReorder={(entries, parentId) => reorder("website", entries, parentId)}
             onAddItem={folderId => openForm("website", { folderId })}
             onEditItem={item => { const website = data.websites.find(value => value.id === item.id); if (website) openForm("website", website); }}
             onToggleFavorite={item => { const website = data.websites.find(value => value.id === item.id); if (website) mutate("website.save", { ...website, favorite: !website.favorite }).catch(error => notify(error.message)); }}
@@ -401,6 +451,7 @@ export default function Portal() {
                   onDeleteFolder={id => deleteFolder("imported", id)}
                   onMoveItems={(ids, folderId) => moveItems("imported", ids, folderId)}
                   onDeleteItems={ids => deleteItems("imported", ids)}
+                  onReorder={(entries, parentId) => reorder("imported", entries, parentId)}
                   transfer={{ folders: { website: data.websiteFolders, private: areaFolders("private") }, move: moveImportedBatch }}
                 />
               : <BookmarkWorkspace key="private" area="private" folders={areaFolders("private")} items={privateItems} notify={notify}
@@ -410,11 +461,17 @@ export default function Portal() {
                   onDeleteFolder={id => deleteFolder("private", id)}
                   onMoveItems={(ids, folderId) => moveItems("private", ids, folderId)}
                   onDeleteItems={ids => deleteItems("private", ids)}
+                  onReorder={(entries, parentId) => reorder("private", entries, parentId)}
                   onAddItem={folderId => openForm("private", { folderId })}
                   onEditItem={item => { const secret = privateItems.find(value => value.id === item.id); if (secret) openForm("private", secret); }}
                 />)}
 
           {section === "Settings" && <div className="settings-grid"><div className="settings-card"><div className="settings-card-icon"><Sun size={20}/></div><div><h3>外观</h3><p>选择适合你的界面主题。</p><div className="segmented">{(["light","dark","system"] as const).map(t => <button key={t} className={theme === t ? "chosen" : ""} onClick={() => setTheme(t)}>{t === "light" ? "浅色" : t === "dark" ? "深色" : "跟随系统"}</button>)}</div></div></div><div className="settings-card"><div className="settings-card-icon"><ShieldCheck size={20}/></div><div><h3>加密区域</h3><p>已导入书签和私密网址共用一把主密钥。解密内容只保留在当前浏览器会话中。</p><div className="settings-actions"><span className={`pill ${keyReady ? "unlocked" : ""}`}>{keyReady ? "已解锁" : "已锁定"}</span><Btn onClick={() => keyReady ? lock() : setModal("unlock")}>{keyReady ? "立即锁定" : data.vault ? "解锁" : "设置保险库"}</Btn></div><Field label="无操作后自动锁定"><select value={autoLock} onChange={e => { const value = Number(e.target.value); setAutoLock(value); localStorage.setItem("hnova-autolock", String(value)); }}><option value={5}>5 分钟</option><option value={10}>10 分钟</option><option value={30}>30 分钟</option></select></Field></div></div><div className="settings-card"><div className="settings-card-icon"><ArrowDownToLine size={20}/></div><div><h3>导入历史</h3><p>导入批次仅用于记录历史，不作为书签目录。</p>{data.batches.length ? <div className="history-list">{data.batches.map(b => <div key={b.id}><span><strong>{b.source}</strong><small>{new Date(b.importedAt).toLocaleString()}</small></span><span>{b.scanned} 已扫描 · {b.added} 新增 · {b.skipped} 跳过</span></div>)}</div> : <span className="muted">暂无导入记录。</span>}</div></div><div className="settings-card"><div className="settings-card-icon"><HardDrive size={20}/></div><div><h3>本地优先</h3><p>数据保存在 SQLite 文件 <code>data/portal.db</code>。请备份数据库并妥善保管主密码；主密码无法找回。</p><span className="pill">仅限本机访问</span></div></div></div>}
+          {section === "Settings" && <div className="settings-grid data-tools">
+            <div className="settings-card"><div className="settings-card-icon"><HardDrive size={20}/></div><div><h3>完整备份与恢复</h3><p>保存网站、服务、文件夹、回收站和保险库密文。恢复时会替换当前所有数据，私密内容仍需原主密码解锁。</p><div className="settings-actions"><Btn onClick={exportBackup}>下载完整备份</Btn><label className="btn btn-secondary upload-btn">选择备份文件<input type="file" accept=".json,application/json" onChange={event => { const file = event.target.files?.[0]; if (file) void previewBackup(file); event.target.value = ""; }}/></label></div>{backupPreview && <div className="backup-preview"><strong>备份预览 · {new Date(backupPreview.exportedAt).toLocaleString()}</strong><span>{backupPreview.counts.websites} 个网站 · {backupPreview.counts.website_folders} 个文件夹 · {backupPreview.counts.protected_items} 个加密项目 · {backupPreview.counts.services} 个服务</span><Btn kind="danger" disabled={busy} onClick={restoreBackup}>确认替换并恢复</Btn></div>}</div></div>
+            <div className="settings-card"><div className="settings-card-icon"><Globe2 size={20}/></div><div><h3>导出浏览器书签</h3><p>将「网站」里的文件夹和网址导出为可供浏览器导入的 HTML 文件，不包含私密区域。</p><div className="settings-actions"><Btn onClick={exportBookmarks}>导出网站书签 HTML</Btn></div></div></div>
+            <div className="settings-card trash-card"><div className="settings-card-icon"><Trash2 size={20}/></div><div><h3>回收站</h3><p>删除的网站、文件夹和加密项目可以在这里恢复。</p>{data.trash.length ? <><div className="trash-list">{data.trash.map(entry => <div key={entry.id}><span><strong>{entry.area === "website" ? "网站" : entry.area === "imported" ? "已导入" : "私密"} · {entry.label}</strong><small>{new Date(entry.deletedAt).toLocaleString()} · {entry.count} 项</small></span><Btn onClick={() => restoreTrash(entry.id)}>恢复</Btn><Btn kind="danger" onClick={() => purgeTrash(entry.id)}>永久删除</Btn></div>)}</div><Btn kind="danger" onClick={async () => { if (!confirm("清空整个回收站？此操作无法撤销。")) return; try { await mutate("trash.empty", {}); notify("回收站已清空"); } catch (error) { notify((error as Error).message); } }}>清空回收站</Btn></> : <span className="muted">回收站为空。</span>}</div></div>
+          </div>}
         </>}
       </div>
     </main>
@@ -424,6 +481,6 @@ export default function Portal() {
     {modal && <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget) setModal(null); }}><div className={`dialog ${modal === "import" ? "import-dialog" : ""}`}><div className="dialog-head"><div><span className="panel-kicker">HNOVA PORTAL</span><h2>{modal === "unlock" ? data.vault ? "解锁加密区域" : "创建保险库" : modal === "import" ? "导入书签" : `${editing?.id ? "编辑" : "添加"}${formLabels[modal] || "项目"}`}</h2></div><button className="icon-btn" onClick={() => setModal(null)}><X size={19}/></button></div>
       {modal === "unlock" ? <form onSubmit={unlock} className="dialog-body"><p className="dialog-hint">{data.vault ? "输入主密码，在当前浏览器中解密加密网址。" : "设置主密码并妥善保管；忘记后无法恢复。"}</p><Field label="主密码"><input name="password" type="password" minLength={8} required autoFocus autoComplete="off"/></Field>{!data.vault && <Field label="确认主密码"><input name="confirm" type="password" minLength={8} required autoComplete="off"/></Field>}<div className="dialog-actions"><Btn onClick={() => setModal(null)}>取消</Btn><Btn kind="primary" type="submit" disabled={busy}>{busy ? "处理中..." : data.vault ? "解锁" : "创建保险库"}</Btn></div></form> : modal === "import" ? <div className="dialog-body"><p className="dialog-hint">选择本机浏览器配置档案或导出的 HTML 书签文件。导入前可先预览。</p><div className="import-source-list">{profiles.map(p => <button key={`${p.browser}-${p.profile}`} onClick={() => readProfile(p)}><Globe2 size={18}/><span><strong>{p.browser}</strong><small>{p.label} · {p.profile}</small></span><ArrowRight size={16}/></button>)}<label className="html-upload"><FileUp size={18}/><span><strong>HTML 书签文件</strong><small>选择导出文件</small></span><input type="file" accept=".html,.htm,text/html" onChange={e => { const file = e.target.files?.[0]; if (file) readHtml(file).catch(err => notify(err.message)); }}/><ArrowRight size={16}/></label></div>{preview && <div className="preview-box"><div className="preview-head"><strong>{preview.source}</strong><span>预览</span></div><div className="preview-stats"><div><strong>{preview.entries.length}</strong><span>书签</span></div><div><strong>{preview.folders}</strong><span>文件夹</span></div><div><strong>{duplicateCount}</strong><span>重复项</span></div></div><div className="preview-samples">{preview.entries.slice(0,4).map((e,i) => <div key={i}><span>{e.name}</span><small>{e.folder || "书签"}</small></div>)}</div><Field label="网址已存在时"><select value={duplicateMode} onChange={e => setDuplicateMode(e.target.value as typeof duplicateMode)}><option value="skip">跳过重复项</option><option value="keep">两条都保留</option><option value="merge">合并已导入的重复项</option></select></Field></div>}<div className="dialog-actions"><Btn onClick={() => { setModal(null); setPreview(null); }}>取消</Btn><Btn kind="primary" onClick={commitImport} disabled={!preview || busy || (preview.entries.length === 0 && preview.folderPaths.length === 0)}>{busy ? "正在导入..." : "导入收件箱"}</Btn></div></div> : <form onSubmit={saveForm} className="dialog-body"><div className="form-grid"><Field label="名称"><input name="name" defaultValue={String(editing?.name || "")} required autoFocus placeholder="例如 GitHub"/></Field>{modal === "service" ? <><Field label="设备"><select name="serverId" defaultValue={String(editing?.serverId || "")}><option value="">独立服务</option>{data.servers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field><Field label="主机地址"><input name="host" defaultValue={String(editing?.host || "")} placeholder="192.168.1.100"/></Field><Field label="端口"><input name="port" type="number" min="1" max="65535" defaultValue={String(editing?.port || "")} placeholder="8096"/></Field><Field label="协议"><select name="protocol" defaultValue={String(editing?.protocol || "http")}><option value="http">HTTP</option><option value="https">HTTPS</option></select></Field><Field label="路径"><input name="path" defaultValue={String(editing?.path || "")} placeholder="/dashboard"/></Field></> : modal === "server" ? <><Field label="主机地址"><input name="host" defaultValue={String(editing?.host || "")} required placeholder="192.168.1.100"/></Field><Field label="环境"><input name="environment" defaultValue={String(editing?.environment || "家庭")} placeholder="家庭"/></Field></> : <Field label="URL"><input name="url" type="url" defaultValue={String(editing?.url || "")} required placeholder="https://example.com"/></Field>}{modal === "service" && <><Field label="环境"><input name="environment" defaultValue={String(editing?.environment || "家庭")} placeholder="开发"/></Field><Field label="标签（用逗号分隔）"><input name="tags" defaultValue={Array.isArray(editing?.tags) ? editing.tags.join(", ") : ""} placeholder="AI、工具"/></Field><Field label="别名"><input name="alias" defaultValue={String(editing?.alias || "")} placeholder="gh"/></Field></>}{(modal === "website" || modal === "private") && <Field label="文件夹"><select name="folderId" defaultValue={String(editing?.folderId || "")}><option value="">根目录</option>{areaFolders(modal === "website" ? "website" : "private").map(folder => <option key={folder.id} value={folder.id}>{folderPath(folder, areaFolders(modal === "website" ? "website" : "private"))}</option>)}</select></Field>}</div>{modal === "website" && <Field label="图标 URL（可选）"><input name="icon" type="url" defaultValue={String(editing?.icon || "")} placeholder="https://example.com/favicon.ico"/></Field>}<Field label="描述"><textarea name="description" defaultValue={String(editing?.description || "")} rows={3} placeholder="简要说明..."/></Field>{modal === "private" && <Field label="私密备注"><textarea name="notes" defaultValue={String(editing?.notes || "")} rows={3}/></Field>}{modal === "website" && <label className="checkbox"><input name="favorite" type="checkbox" defaultChecked={!!editing?.favorite}/><Heart size={16}/> 加入收藏</label>}<div className="dialog-actions">{Boolean(editing?.id) && <Btn kind="danger" onClick={() => { const current = modal; setModal(null); doDelete(current === "private" ? "protected.delete" : `${current}.delete`, String(editing?.id)); }}><Trash2 size={15}/> 删除</Btn>}<span className="action-spacer"/><Btn onClick={() => setModal(null)}>取消</Btn><Btn kind="primary" type="submit" disabled={busy}>{busy ? "正在保存..." : "保存"}</Btn></div></form>}
     </div></div>}
-    {toast && <div className="toast"><Check size={16}/>{toast}</div>}
+    {toast && <div className="toast"><Check size={16}/>{toast}{undoId && <button className="toast-undo" onClick={() => void restoreTrash(undoId)}>撤销</button>}</div>}
   </div>;
 }
