@@ -48,6 +48,7 @@ export async function POST(request: Request) {
       const name = required(item.name, 160);
       const folderId = string(item.folderId, 80) || null;
       websiteFolder(folderId);
+      const previous = db.prepare("SELECT url FROM websites WHERE id = ?").get(id) as { url: string } | undefined;
       db.prepare(`INSERT INTO websites (id,name,url,description,icon,tags,collection,folder_id,sort_order,favorite,alias,created_at)
       VALUES (@id,@name,@url,@description,@icon,@tags,@collection,@folderId,@sortOrder,@favorite,@alias,@createdAt)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,description=excluded.description,icon=excluded.icon,tags=excluded.tags,collection=excluded.collection,sort_order=CASE WHEN websites.folder_id IS excluded.folder_id THEN websites.sort_order ELSE excluded.sort_order END,folder_id=excluded.folder_id,favorite=excluded.favorite,alias=excluded.alias`).run({
@@ -55,6 +56,7 @@ export async function POST(request: Request) {
         tags: JSON.stringify(tags(item.tags)), collection: string(item.collection, 80), folderId, sortOrder: nextOrder(folderId), favorite: item.favorite ? 1 : 0,
         alias: string(item.alias, 80), createdAt: now
       });
+      if (previous && previous.url !== url) db.prepare("DELETE FROM website_checks WHERE website_id = ?").run(id);
     } else if (action === "website.delete") {
       const websiteId = required(item.id, 80);
       db.transaction(() => { const row = db.prepare("SELECT * FROM websites WHERE id = ?").get(websiteId); if (row) { trash("website", "1 个网站", { websites: [row] }); db.prepare("DELETE FROM websites WHERE id = ?").run(websiteId); } })();

@@ -4,10 +4,10 @@ import { localRequest } from "@/lib/validation";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const tables = ["websites", "website_folders", "servers", "services", "vault", "protected_items", "import_batches", "trash_entries"] as const;
+const tables = ["websites", "website_folders", "servers", "services", "vault", "protected_items", "import_batches", "trash_entries", "website_checks"] as const;
 type Table = typeof tables[number];
 type Row = Record<string, unknown>;
-type Backup = { format: "HNovaPortalBackup"; version: 1; exportedAt: string; tables: Record<Table, Row[]> };
+type Backup = { format: "HNovaPortalBackup"; version: 1 | 2; exportedAt: string; tables: Record<Table, Row[]> };
 const columns: Record<Table, string[]> = {
   websites: ["id", "name", "url", "description", "icon", "tags", "collection", "folder_id", "sort_order", "favorite", "alias", "created_at"],
   website_folders: ["id", "parent_id", "name", "sort_order", "created_at"],
@@ -16,12 +16,14 @@ const columns: Record<Table, string[]> = {
   vault: ["id", "salt", "verifier_payload", "verifier_nonce", "crypto_version", "created_at"],
   protected_items: ["id", "kind", "payload", "nonce", "crypto_version", "created_at"],
   import_batches: ["id", "source", "scanned", "added", "skipped", "imported_at"],
-  trash_entries: ["id", "area", "label", "count", "payload", "deleted_at"]
+  trash_entries: ["id", "area", "label", "count", "payload", "deleted_at"],
+  website_checks: ["website_id", "state", "code", "checked_at"]
 };
 function readBackup(input: unknown): Backup {
   if (!input || typeof input !== "object") throw new Error("无效的备份文件");
   const backup = input as Backup;
-  if (backup.format !== "HNovaPortalBackup" || backup.version !== 1 || !backup.tables || typeof backup.tables !== "object") throw new Error("备份格式或版本不受支持");
+  if (backup.format !== "HNovaPortalBackup" || ![1, 2].includes(backup.version) || !backup.tables || typeof backup.tables !== "object") throw new Error("备份格式或版本不受支持");
+  if (backup.version === 1 && !backup.tables.website_checks) backup.tables.website_checks = [];
   for (const table of tables) {
     const rows = backup.tables[table];
     if (!Array.isArray(rows) || rows.length > 100000) throw new Error(`${table} 数据无效`);
@@ -39,7 +41,7 @@ export async function GET(request: Request) {
   try {
     localRequest(request);
     const data = Object.fromEntries(tables.map(table => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
-    const backup = { format: "HNovaPortalBackup", version: 1, exportedAt: new Date().toISOString(), tables: data };
+    const backup = { format: "HNovaPortalBackup", version: 2, exportedAt: new Date().toISOString(), tables: data };
     return new Response(JSON.stringify(backup), { headers: { "Content-Type": "application/json; charset=utf-8", "Content-Disposition": `attachment; filename="HNovaPortal-${new Date().toISOString().slice(0, 10)}.json"`, "Cache-Control": "no-store" } });
   } catch (error) { return Response.json({ error: (error as Error).message }, { status: 403 }); }
 }
@@ -54,8 +56,8 @@ export async function POST(request: Request) {
     if (body.action === "preview") return Response.json({ exportedAt: backup.exportedAt, counts: counts(backup) });
     if (body.action !== "restore") throw new Error("未知操作");
     db.transaction(() => {
-      for (const table of ["websites", "website_folders", "services", "servers", "protected_items", "vault", "import_batches", "trash_entries"] as const) db.prepare(`DELETE FROM ${table}`).run();
-      for (const table of ["website_folders", "websites", "servers", "services", "vault", "protected_items", "import_batches", "trash_entries"] as const) {
+      for (const table of ["website_checks", "websites", "website_folders", "services", "servers", "protected_items", "vault", "import_batches", "trash_entries"] as const) db.prepare(`DELETE FROM ${table}`).run();
+      for (const table of ["website_folders", "websites", "website_checks", "servers", "services", "vault", "protected_items", "import_batches", "trash_entries"] as const) {
         const names = columns[table];
         const insert = db.prepare(`INSERT INTO ${table} (${names.join(",")}) VALUES (${names.map(name => `@${name}`).join(",")})`);
         const rows = table === "website_folders" ? [...backup.tables[table]] : backup.tables[table];

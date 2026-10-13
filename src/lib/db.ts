@@ -9,6 +9,7 @@ export type Server = { id: string; name: string; host: string; environment: stri
 export type Service = { id: string; serverId: string | null; name: string; host: string; port: number | null; protocol: "http" | "https"; path: string; description: string; tags: string[]; environment: string; alias: string; createdAt: string };
 export type ProtectedRow = { id: string; kind: "imported" | "private"; payload: string; nonce: string; version: number; createdAt: string };
 export type TrashEntry = { id: string; area: "website" | "imported" | "private"; label: string; count: number; deletedAt: string };
+export type WebsiteCheck = { websiteId: string; state: "ok" | "broken" | "unknown"; code: number | null; checkedAt: string };
 
 const databasePath = process.env.HNOVA_DB_PATH || path.join(process.cwd(), "data", "portal.db");
 fs.mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -51,6 +52,10 @@ CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS trash_entries (
   id TEXT PRIMARY KEY, area TEXT NOT NULL, label TEXT NOT NULL, count INTEGER NOT NULL,
   payload TEXT NOT NULL, deleted_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS website_checks (
+  website_id TEXT PRIMARY KEY REFERENCES websites(id) ON DELETE CASCADE,
+  state TEXT NOT NULL, code INTEGER, checked_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_protected_kind ON protected_items(kind);
 CREATE INDEX IF NOT EXISTS idx_websites_collection ON websites(collection);
@@ -99,7 +104,8 @@ export function snapshot() {
   const vault = db.prepare("SELECT salt, verifier_payload AS verifierPayload, verifier_nonce AS verifierNonce, crypto_version AS version FROM vault WHERE id = 1").get();
   const batches = db.prepare("SELECT id, source, scanned, added, skipped, imported_at AS importedAt FROM import_batches ORDER BY imported_at DESC LIMIT 30").all();
   const trash = db.prepare("SELECT id,area,label,count,deleted_at AS deletedAt FROM trash_entries ORDER BY deleted_at DESC,rowid DESC").all() as TrashEntry[];
-  return { websites, websiteFolders, servers, services, protectedRows, vault: vault || null, batches, trash };
+  const websiteChecks = db.prepare("SELECT website_id AS websiteId,state,code,checked_at AS checkedAt FROM website_checks").all() as WebsiteCheck[];
+  return { websites, websiteFolders, servers, services, protectedRows, vault: vault || null, batches, trash, websiteChecks };
 }
 
 export default db;

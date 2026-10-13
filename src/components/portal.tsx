@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowDownToLine, ArrowRight, Check, ChevronDown, Command, Compass, ExternalLink, FileUp, Globe2, HardDrive, Heart, Home, KeyRound, LayoutGrid, LockKeyhole, Menu, Moon, MoreHorizontal, Plus, Search, Server as ServerIcon, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, Sun, Trash2, X } from "lucide-react";
-import type { ProtectedRow, Server, Service, TrashEntry, Website, WebsiteFolder } from "@/lib/db";
+import type { ProtectedRow, Server, Service, TrashEntry, Website, WebsiteCheck, WebsiteFolder } from "@/lib/db";
 import { decrypt, deriveKey, encrypt, newSalt, type SecretFolder, type SecretItem, verifier } from "@/lib/vault";
 import { decodeNodes, migrateLegacyFolders, type EncryptedWrite } from "@/lib/protected-folders";
 import { normalizeUrl } from "@/lib/validation";
@@ -10,12 +10,18 @@ import ServiceRow from "@/components/service-row";
 import SiteIcon from "@/components/site-icon";
 import BookmarkWorkspace from "@/components/bookmark-workspace";
 import { bookmarksHtml } from "@/lib/bookmarks-html";
+import { captureFromSearch } from "@/lib/quick-capture";
+import DuplicateCleaner from "@/components/duplicate-cleaner";
+import type { DuplicateEntry } from "@/lib/duplicates";
+import QuickCaptureSetup from "@/components/quick-capture-setup";
+import LinkHealth from "@/components/link-health";
+import ServiceOverview from "@/components/service-overview";
 
 type Section = "Home" | "Websites" | "Imported" | "Private" | "Services" | "Settings";
-type Snapshot = { websites: Website[]; websiteFolders: WebsiteFolder[]; servers: Server[]; services: Service[]; protectedRows: ProtectedRow[]; vault: { salt: string; verifierPayload: string; verifierNonce: string; version: number } | null; batches: { id: string; source: string; scanned: number; added: number; skipped: number; importedAt: string }[]; trash: TrashEntry[] };
+type Snapshot = { websites: Website[]; websiteFolders: WebsiteFolder[]; servers: Server[]; services: Service[]; protectedRows: ProtectedRow[]; vault: { salt: string; verifierPayload: string; verifierNonce: string; version: number } | null; batches: { id: string; source: string; scanned: number; added: number; skipped: number; importedAt: string }[]; trash: TrashEntry[]; websiteChecks: WebsiteCheck[] };
 type ImportEntry = { name: string; url: string; folder: string; browser: string; profile: string };
 type Profile = { browser: string; profile: string; label: string };
-const empty: Snapshot = { websites: [], websiteFolders: [], servers: [], services: [], protectedRows: [], vault: null, batches: [], trash: [] };
+const empty: Snapshot = { websites: [], websiteFolders: [], servers: [], services: [], protectedRows: [], vault: null, batches: [], trash: [], websiteChecks: [] };
 const icons = { Home, Websites: Globe2, Imported: ArrowDownToLine, Private: LockKeyhole, Services: ServerIcon, Settings: Settings2 };
 const nav: Section[] = ["Home", "Websites", "Imported", "Private", "Services", "Settings"];
 const sectionLabels: Record<Section, string> = { Home: "首页", Websites: "网站", Imported: "已导入", Private: "私密", Services: "服务", Settings: "设置" };
@@ -135,6 +141,13 @@ export default function Portal() {
   }, [section]);
 
   useEffect(() => { refresh().catch(e => setError(e.message)).finally(() => setLoading(false)); }, [refresh]);
+  useEffect(() => {
+    if (!new URLSearchParams(window.location.search).has("capture")) return;
+    const captured = captureFromSearch(window.location.search);
+    window.history.replaceState(null, "", window.location.pathname + window.location.hash);
+    if (captured) { setSection("Websites"); setEditing(captured); setModal("website"); }
+    else notify("无法识别网页地址，只支持 http 或 https");
+  }, []);
   useEffect(() => {
     const saved = localStorage.getItem("hnova-theme") as typeof theme | null;
     const next = saved === "dark" || saved === "light" ? saved : "system";
@@ -401,6 +414,26 @@ export default function Portal() {
   const imported = secrets.filter(s => s.kind === "imported");
   const privateItems = secrets.filter(s => s.kind === "private");
   const topSites = data.websites.filter(w => w.favorite).slice(0, 6);
+  const duplicateEntries: DuplicateEntry[] = [
+    ...data.websites.map(item => { const folder = data.websiteFolders.find(value => value.id === item.folderId); return { id: item.id, area: "website" as const, name: item.name, url: item.url, description: item.description, favorite: item.favorite, location: folder ? folderPath(folder, data.websiteFolders) : "根目录" }; }),
+    ...(keyReady ? secrets.map(item => { const folders = areaFolders(item.kind); const folder = folders.find(value => value.id === item.folderId); return { id: item.id, area: item.kind, name: item.name, url: item.url, description: item.description, location: folder ? folderPath(folder, folders) : "根目录" }; }) : [])
+  ];
+  const keepDuplicate = async (chosen: DuplicateEntry, others: DuplicateEntry[], merge: boolean) => {
+    if (merge) {
+      if (chosen.area === "website") {
+        const website = data.websites.find(item => item.id === chosen.id);
+        if (website) await mutate("website.save", { ...website, description: website.description || others.filter(item => item.area === "website").map(item => item.description).find(Boolean) || "", favorite: website.favorite || others.some(item => item.area === "website" && item.favorite) });
+      } else {
+        const secret = secrets.find(item => item.id === chosen.id && item.kind === chosen.area);
+        if (secret) await saveSecret({ ...secret, description: secret.description || others.map(item => item.description).find(Boolean) || "" });
+      }
+    }
+    const websiteIds = others.filter(item => item.area === "website").map(item => item.id);
+    const protectedIds = others.filter(item => item.area !== "website").map(item => item.id);
+    if (websiteIds.length) await mutate("website.bulkDelete", { ids: websiteIds });
+    if (protectedIds.length) await mutate("protected.deleteMany", { ids: protectedIds });
+    setUndoId(null);
+  };
 
   return <div className="app-shell">
     <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
@@ -439,6 +472,7 @@ export default function Portal() {
             onToggleFavorite={item => { const website = data.websites.find(value => value.id === item.id); if (website) mutate("website.save", { ...website, favorite: !website.favorite }).catch(error => notify(error.message)); }}
           />}
 
+          {section === "Services" && data.services.length > 0 && <ServiceOverview services={data.services} notify={notify}/>}
           {section === "Services" && <><div className="services-intro"><div><span className="panel-kicker">基础设施</span><h2>设备与服务入口</h2><p>集中管理每个本地地址。</p></div><Btn onClick={() => openForm("server")}><Plus size={15}/> 添加设备</Btn></div>{data.servers.length === 0 && data.services.length === 0 ? <EmptyState icon={HardDrive} title="从这里开始管理网络" text="添加设备或服务，建立你的入口。" action={<Btn kind="primary" onClick={() => openForm("server")}>添加设备</Btn>}/> : <div className="service-groups">{data.servers.map(server => <div className="device-panel" key={server.id}><div className="device-head"><span className="device-icon"><HardDrive size={20}/></span><div><h3>{server.name}</h3><p>{server.host} <span>·</span> {server.environment === "Home" ? "家庭" : server.environment}</p></div><button className="icon-btn" title="编辑设备" onClick={() => openForm("server", server)}><MoreHorizontal size={18}/></button></div><div className="device-services">{data.services.filter(s => s.serverId === server.id).map(s => <ServiceRow key={s.id} service={s} edit={() => openForm("service", s)} notify={notify}/>)}<button className="add-child" onClick={() => openForm("service", { serverId: server.id, host: server.host })}><Plus size={15}/> 添加服务</button></div></div>)}{data.services.filter(s => !s.serverId).length > 0 && <div className="device-panel"><div className="device-head"><span className="device-icon"><Compass size={20}/></span><div><h3>独立服务</h3><p>未关联设备的服务入口</p></div></div><div className="device-services">{data.services.filter(s => !s.serverId).map(s => <ServiceRow key={s.id} service={s} edit={() => openForm("service", s)} notify={notify}/>)}</div></div>}</div>}</>}
 
           {(section === "Imported" || section === "Private") && (!keyReady
@@ -468,6 +502,9 @@ export default function Portal() {
 
           {section === "Settings" && <div className="settings-grid"><div className="settings-card"><div className="settings-card-icon"><Sun size={20}/></div><div><h3>外观</h3><p>选择适合你的界面主题。</p><div className="segmented">{(["light","dark","system"] as const).map(t => <button key={t} className={theme === t ? "chosen" : ""} onClick={() => setTheme(t)}>{t === "light" ? "浅色" : t === "dark" ? "深色" : "跟随系统"}</button>)}</div></div></div><div className="settings-card"><div className="settings-card-icon"><ShieldCheck size={20}/></div><div><h3>加密区域</h3><p>已导入书签和私密网址共用一把主密钥。解密内容只保留在当前浏览器会话中。</p><div className="settings-actions"><span className={`pill ${keyReady ? "unlocked" : ""}`}>{keyReady ? "已解锁" : "已锁定"}</span><Btn onClick={() => keyReady ? lock() : setModal("unlock")}>{keyReady ? "立即锁定" : data.vault ? "解锁" : "设置保险库"}</Btn></div><Field label="无操作后自动锁定"><select value={autoLock} onChange={e => { const value = Number(e.target.value); setAutoLock(value); localStorage.setItem("hnova-autolock", String(value)); }}><option value={5}>5 分钟</option><option value={10}>10 分钟</option><option value={30}>30 分钟</option></select></Field></div></div><div className="settings-card"><div className="settings-card-icon"><ArrowDownToLine size={20}/></div><div><h3>导入历史</h3><p>导入批次仅用于记录历史，不作为书签目录。</p>{data.batches.length ? <div className="history-list">{data.batches.map(b => <div key={b.id}><span><strong>{b.source}</strong><small>{new Date(b.importedAt).toLocaleString()}</small></span><span>{b.scanned} 已扫描 · {b.added} 新增 · {b.skipped} 跳过</span></div>)}</div> : <span className="muted">暂无导入记录。</span>}</div></div><div className="settings-card"><div className="settings-card-icon"><HardDrive size={20}/></div><div><h3>本地优先</h3><p>数据保存在 SQLite 文件 <code>data/portal.db</code>。请备份数据库并妥善保管主密码；主密码无法找回。</p><span className="pill">仅限本机访问</span></div></div></div>}
           {section === "Settings" && <div className="settings-grid data-tools">
+            <QuickCaptureSetup notify={notify}/>
+            <DuplicateCleaner entries={duplicateEntries} onKeep={keepDuplicate} notify={notify}/>
+            <LinkHealth websites={data.websites} checks={data.websiteChecks} secrets={secrets} unlocked={keyReady} onChecks={checks => setData(previous => ({ ...previous, websiteChecks: checks }))} notify={notify}/>
             <div className="settings-card"><div className="settings-card-icon"><HardDrive size={20}/></div><div><h3>完整备份与恢复</h3><p>保存网站、服务、文件夹、回收站和保险库密文。恢复时会替换当前所有数据，私密内容仍需原主密码解锁。</p><div className="settings-actions"><Btn onClick={exportBackup}>下载完整备份</Btn><label className="btn btn-secondary upload-btn">选择备份文件<input type="file" accept=".json,application/json" onChange={event => { const file = event.target.files?.[0]; if (file) void previewBackup(file); event.target.value = ""; }}/></label></div>{backupPreview && <div className="backup-preview"><strong>备份预览 · {new Date(backupPreview.exportedAt).toLocaleString()}</strong><span>{backupPreview.counts.websites} 个网站 · {backupPreview.counts.website_folders} 个文件夹 · {backupPreview.counts.protected_items} 个加密项目 · {backupPreview.counts.services} 个服务</span><Btn kind="danger" disabled={busy} onClick={restoreBackup}>确认替换并恢复</Btn></div>}</div></div>
             <div className="settings-card"><div className="settings-card-icon"><Globe2 size={20}/></div><div><h3>导出浏览器书签</h3><p>将「网站」里的文件夹和网址导出为可供浏览器导入的 HTML 文件，不包含私密区域。</p><div className="settings-actions"><Btn onClick={exportBookmarks}>导出网站书签 HTML</Btn></div></div></div>
             <div className="settings-card trash-card"><div className="settings-card-icon"><Trash2 size={20}/></div><div><h3>回收站</h3><p>删除的网站、文件夹和加密项目可以在这里恢复。</p>{data.trash.length ? <><div className="trash-list">{data.trash.map(entry => <div key={entry.id}><span><strong>{entry.area === "website" ? "网站" : entry.area === "imported" ? "已导入" : "私密"} · {entry.label}</strong><small>{new Date(entry.deletedAt).toLocaleString()} · {entry.count} 项</small></span><Btn onClick={() => restoreTrash(entry.id)}>恢复</Btn><Btn kind="danger" onClick={() => purgeTrash(entry.id)}>永久删除</Btn></div>)}</div><Btn kind="danger" onClick={async () => { if (!confirm("清空整个回收站？此操作无法撤销。")) return; try { await mutate("trash.empty", {}); notify("回收站已清空"); } catch (error) { notify((error as Error).message); } }}>清空回收站</Btn></> : <span className="muted">回收站为空。</span>}</div></div>
