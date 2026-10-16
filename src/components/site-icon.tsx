@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Globe2 } from "lucide-react";
 
-function candidates(url: string, icon?: string) {
+function candidates(url: string, icon?: string, websiteId?: string) {
   const sources: string[] = [];
   for (const value of [icon]) {
     if (!value) continue;
@@ -15,6 +15,7 @@ function candidates(url: string, icon?: string) {
   try {
     const site = new URL(url);
     if (site.protocol === "http:" || site.protocol === "https:") {
+      if (websiteId) sources.push(`/api/site-icon?id=${encodeURIComponent(websiteId)}&v=${encodeURIComponent(site.origin)}`);
       sources.push(new URL("/favicon.ico", site).href);
       sources.push(new URL("/apple-touch-icon.png", site).href);
     }
@@ -22,10 +23,10 @@ function candidates(url: string, icon?: string) {
   return [...new Set(sources)];
 }
 
-export default function SiteIcon({ url, icon, className = "site-icon" }: { url: string; icon?: string; className?: string }) {
+export default function SiteIcon({ url, icon, websiteId, className = "site-icon" }: { url: string; icon?: string; websiteId?: string; className?: string }) {
   const [attempt, setAttempt] = useState(0);
-  useEffect(() => setAttempt(0), [url, icon]);
-  const sources = candidates(url, icon);
+  useEffect(() => setAttempt(0), [url, icon, websiteId]);
+  const sources = candidates(url, icon, websiteId);
   return <span className={className} aria-hidden="true">
     {sources[attempt]
       // Favicons can be ICO or SVG, so use the browser's native image decoder.

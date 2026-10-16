@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Browser = "Chrome" | "Edge";
-type Entry = { name: string; url: string; folder: string; browser: Browser; profile: string };
+type Entry = { name: string; url: string; folder: string; folderPath: string[]; browser: Browser; profile: string };
 const roots: Record<Browser, string> = {
   Chrome: path.join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "User Data"),
   Edge: path.join(process.env.LOCALAPPDATA || "", "Microsoft", "Edge", "User Data")
@@ -40,7 +40,7 @@ function parseBookmarks(data: unknown, browser: Browser, profile: string): { ent
     if (!node || typeof node !== "object") return;
     const item = node as { type?: string; name?: string; url?: string; children?: unknown[] };
     if (item.type === "url" && typeof item.url === "string" && /^https?:\/\//i.test(item.url)) {
-      entries.push({ name: item.name || item.url, url: item.url, folder: trail.join(" / "), browser, profile });
+      entries.push({ name: item.name || item.url, url: item.url, folder: trail.join(" / "), folderPath: trail, browser, profile });
     } else if (item.type === "folder") {
       folders++;
       const next = item.name ? [...trail, item.name] : trail;

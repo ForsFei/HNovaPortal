@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { ChevronRight, ExternalLink, Folder, FolderPlus, Globe2, Heart, KeyRound, MoreHorizontal, Search, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowDownToLine, ChevronRight, ExternalLink, Folder, FolderPlus, Globe2, Heart, KeyRound, LayoutGrid, List, MoreHorizontal, Rows3, Search, Trash2 } from "lucide-react";
 import SiteIcon from "@/components/site-icon";
 
 export type FolderEntry = { id: string; name: string; parentId: string | null; sortOrder?: number; createdAt?: string };
@@ -18,6 +18,7 @@ type Props = {
   onDeleteItems: (ids: string[]) => Promise<void>;
   onReorder: (entries: { id: string; type: "items" | "folder" }[], parentId: string | null) => Promise<void>;
   onAddItem?: (folderId: string | null) => void;
+  onImport?: () => void;
   onEditItem?: (item: LinkEntry) => void;
   onToggleFavorite?: (item: LinkEntry) => void;
   transfer?: Transfer;
@@ -25,8 +26,10 @@ type Props = {
 };
 
 type DragPayload = { area: Area; type: "items" | "folder"; ids: string[] };
+type Layout = "list" | "compact" | "grid";
 const labels: Record<Area, string> = { website: "网站", imported: "已导入", private: "私密" };
 const dragType = "application/x-hnova-bookmarks";
+const siteHost = (url: string) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } };
 
 export default function BookmarkWorkspace(props: Props) {
   const { area, folders, items, notify } = props;
@@ -38,7 +41,16 @@ export default function BookmarkWorkspace(props: Props) {
   const [moveFolderId, setMoveFolderId] = useState("");
   const [transferFolderId, setTransferFolderId] = useState("");
   const [busy, setBusy] = useState(false);
+  const [layout, setLayout] = useState<Layout>("list");
+  const [cardSize, setCardSize] = useState(210);
+  const selectionAnchor = useRef<string | null>(null);
 
+  useEffect(() => {
+    const saved = localStorage.getItem("hnova-bookmark-layout");
+    if (saved === "list" || saved === "compact" || saved === "grid") setLayout(saved);
+    const savedCardSize = Number(localStorage.getItem("hnova-bookmark-card-size"));
+    if (Number.isFinite(savedCardSize) && savedCardSize >= 160 && savedCardSize <= 340) setCardSize(savedCardSize);
+  }, []);
   useEffect(() => setSelected(previous => previous.filter(id => items.some(item => item.id === id))), [items]);
   useEffect(() => { if (current && !folders.some(folder => folder.id === current)) setCurrent(null); }, [current, folders]);
   useEffect(() => setTransferFolderId(""), [targetArea]);
@@ -54,7 +66,60 @@ export default function BookmarkWorkspace(props: Props) {
   ].sort((left, right) => byOrder(left.value, right.value));
   const allVisibleSelected = visibleItems.length > 0 && visibleItems.every(item => selected.includes(item.id));
   const toggleVisible = () => setSelected(previous => allVisibleSelected ? previous.filter(id => !visibleItems.some(item => item.id === id)) : [...new Set([...previous, ...visibleItems.map(item => item.id)])]);
-  const toggle = (id: string) => setSelected(previous => previous.includes(id) ? previous.filter(value => value !== id) : [...previous, id]);
+  const chooseLayout = (next: Layout) => { setLayout(next); localStorage.setItem("hnova-bookmark-layout", next); };
+  const resizeCards = (size: number) => { setCardSize(size); localStorage.setItem("hnova-bookmark-card-size", String(size)); };
+  const toggle = (id: string) => { selectionAnchor.current = id; setSelected(previous => previous.includes(id) ? previous.filter(value => value !== id) : [...previous, id]); };
+  const selectRange = (id: string, additive: boolean) => {
+    const ids = visibleItems.map(item => item.id);
+    const start = ids.indexOf(selectionAnchor.current || id);
+    const end = ids.indexOf(id);
+    if (end < 0) return;
+    const range = ids.slice(Math.min(start < 0 ? end : start, end), Math.max(start < 0 ? end : start, end) + 1);
+    setSelected(previous => additive ? [...new Set([...previous, ...range])] : range);
+  };
+  const selectClicked = (event: React.MouseEvent, id: string) => {
+    if (event.shiftKey) selectRange(id, event.ctrlKey || event.metaKey);
+    else if (event.ctrlKey || event.metaKey) toggle(id);
+    else { selectionAnchor.current = id; setSelected([id]); }
+  };
+  const rowKeyDown = (event: React.KeyboardEvent<HTMLDivElement>, type: "items" | "folder", id: string) => {
+    if (busy || event.target !== event.currentTarget) return;
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+      event.preventDefault(); setSelected(visibleItems.map(item => item.id)); selectionAnchor.current = id; return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (event.shiftKey && !selectionAnchor.current && type === "items") selectionAnchor.current = id;
+      const rows = [...(event.currentTarget.parentElement?.querySelectorAll<HTMLElement>("[data-bookmark-row]") || [])];
+      const next = rows[Math.max(0, Math.min(rows.length - 1, rows.indexOf(event.currentTarget) + (event.key === "ArrowDown" ? 1 : -1)))];
+      next?.focus();
+      if (event.shiftKey && next?.dataset.rowType === "items") selectRange(next.dataset.rowId!, event.ctrlKey || event.metaKey);
+      return;
+    }
+    if (event.key === "Escape") { setSelected([]); return; }
+    if (event.key === "Delete") {
+      event.preventDefault();
+      if (selected.length) deleteItems(selected);
+      else if (type === "items") deleteItems([id]);
+      else { const folder = folders.find(value => value.id === id); if (folder) deleteFolder(folder); }
+      return;
+    }
+    if (event.key.toLowerCase() === "m" && !event.ctrlKey && !event.metaKey && selected.length) {
+      event.preventDefault(); document.querySelector<HTMLSelectElement>(".folder-selection select")?.focus(); return;
+    }
+    if (event.key === "F2") {
+      event.preventDefault();
+      if (type === "folder") { const folder = folders.find(value => value.id === id); if (folder) renameFolder(folder); }
+      else { const item = items.find(value => value.id === id); if (item) props.onEditItem?.(item); }
+      return;
+    }
+    if (event.key === " " && type === "items") { event.preventDefault(); if (event.shiftKey) selectRange(id, event.ctrlKey || event.metaKey); else toggle(id); return; }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (type === "folder") { setCurrent(id); setSearch(""); }
+      else { const item = items.find(value => value.id === id); if (item) window.open(item.url, "_blank", "noopener,noreferrer"); }
+    }
+  };
   const run = async (work: () => Promise<void>, success: string) => {
     try { setBusy(true); await work(); notify(success); }
     catch (error) { notify((error as Error).message); }
@@ -145,7 +210,7 @@ export default function BookmarkWorkspace(props: Props) {
     crumbs.unshift(folder); cursor = folder.parentId;
   }
 
-  return <div className="bookmark-workspace">
+  return <div className={`bookmark-workspace ${layout === "grid" ? "bookmark-workspace-grid" : ""}`} style={{ "--bookmark-card-width": `${cardSize}px` } as React.CSSProperties}>
     <aside className="folder-sidebar">
       <div className="folder-sidebar-head"><strong>文件夹</strong><button title="添加文件夹" onClick={createFolder}><FolderPlus size={17}/></button></div>
       <div className={`folder-root ${current === null ? "active" : ""} ${dragOver === "root" ? "drop-active" : ""}`} {...dropHandlers(null)}>
@@ -154,22 +219,24 @@ export default function BookmarkWorkspace(props: Props) {
       <div className="folder-tree">{tree()}</div>
     </aside>
     <section className="folder-content">
-      <div className="folder-toolbar"><div className="folder-breadcrumb"><button {...dropHandlers(null)} onClick={() => setCurrent(null)}>{labels[area]}</button>{crumbs.map(folder => <span key={folder.id}><ChevronRight size={13}/><button {...dropHandlers(folder.id)} onClick={() => setCurrent(folder.id)}>{folder.name}</button></span>)}</div><div className="folder-actions"><button onClick={createFolder}><FolderPlus size={15}/> 添加文件夹</button>{props.onAddItem && <button onClick={() => props.onAddItem!(current)}><Globe2 size={15}/> 添加{area === "website" ? "网站" : "网址"}</button>}</div></div>
+      <div className="folder-toolbar"><div className="folder-breadcrumb"><button {...dropHandlers(null)} onClick={() => setCurrent(null)}>{labels[area]}</button>{crumbs.map(folder => <span key={folder.id}><ChevronRight size={13}/><button {...dropHandlers(folder.id)} onClick={() => setCurrent(folder.id)}>{folder.name}</button></span>)}</div><div className="folder-actions"><button onClick={createFolder}><FolderPlus size={15}/> 添加文件夹</button>{props.onAddItem && <button onClick={() => props.onAddItem!(current)}><Globe2 size={15}/> 添加{area === "website" ? "网站" : "网址"}</button>}{props.onImport && <button onClick={props.onImport}><ArrowDownToLine size={15}/> 导入书签</button>}</div></div>
       <div className="folder-search"><Search size={16}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder={`搜索${labels[area]}...`}/>{!search && <button type="button" onClick={sortByName} disabled={busy}>按名称排序</button>}</div>
       {selected.length > 0 && <div className="folder-selection"><strong>已选 {selected.length} 项</strong><button onClick={() => setSelected([])}>取消选择</button>
-        <select value={moveFolderId} onChange={event => setMoveFolderId(event.target.value)}><option value="">移动到根目录</option>{folderOptions(folders)}</select><button disabled={busy} onClick={() => moveItems(selected, moveFolderId || null)}>移动</button>
+        <select value={moveFolderId} onChange={event => setMoveFolderId(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); moveItems(selected, moveFolderId || null); } }}><option value="">移动到根目录</option>{folderOptions(folders)}</select><button disabled={busy} onClick={() => moveItems(selected, moveFolderId || null)}>移动</button>
         {props.transfer && <><select value={targetArea} onChange={event => setTargetArea(event.target.value as "website" | "private")}><option value="website">移至网站</option><option value="private">移至私密</option></select><select value={transferFolderId} onChange={event => setTransferFolderId(event.target.value)}><option value="">目标根目录</option>{folderOptions(props.transfer.folders[targetArea])}</select><button disabled={busy} onClick={() => void run(async () => { await props.transfer!.move(selected, targetArea, transferFolderId || null); setSelected([]); }, "已移动")}>批量移至</button></>}
         <button className="folder-delete-button" disabled={busy} onClick={() => deleteItems(selected)}><Trash2 size={14}/> 删除</button>
       </div>}
-      <div className="folder-list-heading"><span>{currentName}</span><small>{visibleFolders.length} 个文件夹 · {visibleItems.length} 个网址</small>{visibleItems.length > 0 && <label className="folder-select-all"><input type="checkbox" checked={allVisibleSelected} onChange={toggleVisible}/> 全选当前网址</label>}</div>
-      <div className="folder-list">
-        {visibleEntries.map(entry => entry.type === "folder" ? (() => { const folder = entry.value as FolderEntry; return <div key={`folder-${folder.id}`} className={`folder-list-row ${dragOver === folder.id ? "drop-active" : ""}`} draggable onDragStart={event => startDrag(event, { area, type: "folder", ids: [folder.id] })} {...dropHandlers(folder.id)} onDrop={event => { const payload = dragged(event); if (payload?.ids.every(id => visibleEntries.some(value => value.type === payload.type && value.value.id === id))) reorder(event, folder.id); else dropOn(event, folder.id); }}>
+      <div className="folder-list-heading"><span>{currentName}</span><small>{visibleFolders.length} 个文件夹 · {visibleItems.length} 个网址</small>{visibleItems.length > 0 && <label className="folder-select-all"><input type="checkbox" checked={allVisibleSelected} onChange={toggleVisible}/> 全选当前网址</label>}<div className="folder-view-controls">{layout === "grid" && <label className="card-size-control">卡片大小 <input type="range" min="160" max="340" step="10" value={cardSize} onChange={event => resizeCards(Number(event.target.value))} aria-label="卡片大小"/><output>{cardSize}px</output></label>}<div className="folder-layout-switch" role="group" aria-label="书签布局"><button type="button" title="列表布局" aria-label="列表布局" aria-pressed={layout === "list"} className={layout === "list" ? "active" : ""} onClick={() => chooseLayout("list")}><List size={15}/></button><button type="button" title="紧凑布局" aria-label="紧凑布局" aria-pressed={layout === "compact"} className={layout === "compact" ? "active" : ""} onClick={() => chooseLayout("compact")}><Rows3 size={15}/></button><button type="button" title="卡片布局" aria-label="卡片布局" aria-pressed={layout === "grid"} className={layout === "grid" ? "active" : ""} onClick={() => chooseLayout("grid")}><LayoutGrid size={15}/></button></div></div></div>
+      <p className="folder-keyboard-hint">键盘：↑↓ 定位 · 空格选择 · Shift 扩选 · Ctrl+A 全选 · M 选择目标并回车移动 · Delete 删除 · F2 编辑</p>
+      <div className={`folder-list folder-list-${layout}`}>
+        {visibleEntries.map(entry => entry.type === "folder" ? (() => { const folder = entry.value as FolderEntry; return <div key={`folder-${folder.id}`} data-bookmark-row data-row-id={folder.id} data-row-type="folder" tabIndex={0} onKeyDown={event => rowKeyDown(event, "folder", folder.id)} className={`folder-list-row ${dragOver === folder.id ? "drop-active" : ""}`} draggable onDragStart={event => startDrag(event, { area, type: "folder", ids: [folder.id] })} {...dropHandlers(folder.id)} onDrop={event => { const payload = dragged(event); if (payload?.ids.every(id => visibleEntries.some(value => value.type === payload.type && value.value.id === id))) reorder(event, folder.id); else dropOn(event, folder.id); }}>
           <button className="folder-list-open" onClick={() => { setCurrent(folder.id); setSearch(""); }}><span className="folder-list-icon"><Folder size={19}/></span><strong>{folder.name}</strong><ChevronRight size={16}/></button>
           <button title="重命名" onClick={() => renameFolder(folder)}><MoreHorizontal size={16}/></button><button title="删除文件夹" onClick={() => deleteFolder(folder)}><Trash2 size={15}/></button>
-        </div>; })() : (() => { const item = entry.value as LinkEntry; return <div key={`item-${item.id}`} className={`folder-list-row link-row ${selected.includes(item.id) ? "selected" : ""} ${dragOver === item.id ? "drop-active" : ""}`} draggable onDragStart={event => { const ids = selected.includes(item.id) ? selected : [item.id]; setSelected(ids); startDrag(event, { area, type: "items", ids }); }} onDragOver={event => { event.preventDefault(); setDragOver(item.id); }} onDrop={event => reorder(event, item.id)}>
+        </div>; })() : (() => { const item = entry.value as LinkEntry; return <div key={`item-${item.id}`} data-bookmark-row data-row-id={item.id} data-row-type="items" tabIndex={0} onKeyDown={event => rowKeyDown(event, "items", item.id)} onClick={event => { if (event.target === event.currentTarget) selectClicked(event, item.id); }} className={`folder-list-row link-row ${selected.includes(item.id) ? "selected" : ""} ${dragOver === item.id ? "drop-active" : ""}`} draggable onDragStart={event => { const ids = selected.includes(item.id) ? selected : [item.id]; setSelected(ids); startDrag(event, { area, type: "items", ids }); }} onDragOver={event => { event.preventDefault(); setDragOver(item.id); }} onDrop={event => reorder(event, item.id)}>
           <input type="checkbox" aria-label={`选择 ${item.name}`} checked={selected.includes(item.id)} onChange={() => toggle(item.id)}/>
-          {area === "website" ? <SiteIcon url={item.url} icon={item.icon} className="mini-icon"/> : <span className="mini-icon">{area === "private" ? <KeyRound size={16}/> : <Globe2 size={16}/>}</span>}
+          {area === "website" ? <SiteIcon url={item.url} icon={item.icon} websiteId={item.id} className="mini-icon"/> : <span className="mini-icon">{area === "private" ? <KeyRound size={16}/> : <Globe2 size={16}/>}</span>}
           <a href={item.url} target="_blank" rel="noopener noreferrer"><strong>{item.name}</strong><small>{item.description || item.url}</small></a>
+          <span className="bookmark-card-domain" title={item.url}>{siteHost(item.url)}</span>
           {props.onToggleFavorite && <button title={item.favorite ? "取消收藏" : "收藏"} onClick={() => props.onToggleFavorite!(item)}><Heart size={16} fill={item.favorite ? "currentColor" : "none"}/></button>}
           {props.onEditItem && <button title="编辑" onClick={() => props.onEditItem!(item)}><MoreHorizontal size={16}/></button>}
           <ExternalLink size={14}/>

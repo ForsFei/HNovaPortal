@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowDownToLine, ArrowRight, Check, ChevronDown, Command, Compass, ExternalLink, FileUp, Globe2, HardDrive, Heart, Home, KeyRound, LayoutGrid, LockKeyhole, Menu, Moon, MoreHorizontal, Plus, Search, Server as ServerIcon, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, Sun, Trash2, X } from "lucide-react";
+import { Activity, ArrowDownToLine, ArrowRight, Check, Command, Compass, ExternalLink, FileUp, Globe2, HardDrive, Heart, Home, KeyRound, LayoutGrid, LockKeyhole, Menu, Moon, MoreHorizontal, Plus, Search, Server as ServerIcon, Settings2, ShieldCheck, SlidersHorizontal, Sun, Trash2, X } from "lucide-react";
 import type { ProtectedRow, Server, Service, TrashEntry, Website, WebsiteCheck, WebsiteFolder } from "@/lib/db";
 import { decrypt, deriveKey, encrypt, newSalt, type SecretFolder, type SecretItem, verifier } from "@/lib/vault";
 import { decodeNodes, migrateLegacyFolders, type EncryptedWrite } from "@/lib/protected-folders";
@@ -16,10 +16,11 @@ import type { DuplicateEntry } from "@/lib/duplicates";
 import QuickCaptureSetup from "@/components/quick-capture-setup";
 import LinkHealth from "@/components/link-health";
 import ServiceOverview from "@/components/service-overview";
+import ImportFolderSelection from "@/components/import-folder-selection";
 
 type Section = "Home" | "Websites" | "Imported" | "Private" | "Services" | "Settings";
 type Snapshot = { websites: Website[]; websiteFolders: WebsiteFolder[]; servers: Server[]; services: Service[]; protectedRows: ProtectedRow[]; vault: { salt: string; verifierPayload: string; verifierNonce: string; version: number } | null; batches: { id: string; source: string; scanned: number; added: number; skipped: number; importedAt: string }[]; trash: TrashEntry[]; websiteChecks: WebsiteCheck[] };
-type ImportEntry = { name: string; url: string; folder: string; browser: string; profile: string };
+type ImportEntry = { name: string; url: string; folder: string; folderPath?: string[]; browser: string; profile: string };
 type Profile = { browser: string; profile: string; label: string };
 const empty: Snapshot = { websites: [], websiteFolders: [], servers: [], services: [], protectedRows: [], vault: null, batches: [], trash: [], websiteChecks: [] };
 const icons = { Home, Websites: Globe2, Imported: ArrowDownToLine, Private: LockKeyhole, Services: ServerIcon, Settings: Settings2 };
@@ -75,6 +76,8 @@ export default function Portal() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [preview, setPreview] = useState<{ source: string; entries: ImportEntry[]; folders: number; folderPaths: string[][]; browser: string; profile: string } | null>(null);
   const [duplicateMode, setDuplicateMode] = useState<"skip" | "keep" | "merge">("skip");
+  const [selectedImportFolders, setSelectedImportFolders] = useState<string[]>([]);
+  const [importRootSelected, setImportRootSelected] = useState(true);
   const [busy, setBusy] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const toastTimer = useRef<number | null>(null);
@@ -172,7 +175,7 @@ export default function Portal() {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setPalette(v => !v); }
-      if (event.key === "Escape") { setPalette(false); setModal(null); }
+      if (event.key === "Escape") { setPalette(false); setModal(null); setMobileNav(false); }
     };
     window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler);
   }, []);
@@ -244,7 +247,7 @@ export default function Portal() {
   const discover = async () => {
     try {
       const res = await fetch("/api/browser"); const body = await res.json();
-      if (!res.ok) throw new Error(body.error); setProfiles(body.profiles); openForm("import");
+      if (!res.ok) throw new Error(body.error); setProfiles(body.profiles); setPreview(null); openForm("import");
     } catch (e) { notify((e as Error).message); }
   };
   const readProfile = async (profile: Profile) => {
@@ -252,19 +255,20 @@ export default function Portal() {
       setBusy(true);
       const res = await fetch("/api/browser", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(profile) });
       const body = await res.json(); if (!res.ok) throw new Error(body.error);
-      setPreview({ source: `${profile.browser} · ${profile.label}`, entries: body.entries, folders: body.folders, folderPaths: body.folderPaths || [], browser: profile.browser, profile: profile.profile });
+      const folderPaths: string[][] = body.folderPaths || [];
+      setPreview({ source: `${profile.browser} · ${profile.label}`, entries: body.entries, folders: body.folders, folderPaths, browser: profile.browser, profile: profile.profile });
+      const allPaths: string[][] = [...folderPaths, ...body.entries.map((entry: ImportEntry) => entry.folderPath || (entry.folder ? entry.folder.split(" / ") : []))];
+      setSelectedImportFolders([...new Set(allPaths.flatMap(path => path.map((_, index) => JSON.stringify(path.slice(0, index + 1)))))]);
+      setImportRootSelected(true);
     } catch (e) { notify((e as Error).message); } finally { setBusy(false); }
   };
   const readHtml = async (file: File) => {
     const document = new DOMParser().parseFromString(await file.text(), "text/html");
     const entries: ImportEntry[] = [];
-    const folders = new Set<string>();
     const folderPaths = new Map<string, string[]>();
-    for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
-      const url = anchor.getAttribute("href") || "";
-      if (!/^https?:\/\//i.test(url)) continue;
+    const trailFor = (element: Element) => {
       const trail: string[] = [];
-      let current: Element | null = anchor.parentElement;
+      let current: Element | null = element.parentElement;
       while (current) {
         if (current.tagName === "DL") {
           const previous = current.previousElementSibling;
@@ -273,30 +277,72 @@ export default function Portal() {
         }
         current = current.parentElement;
       }
-      const folder = trail.join(" / "); if (folder) { folders.add(folder); folderPaths.set(JSON.stringify(trail), trail); }
-      entries.push({ name: anchor.textContent?.trim() || url, url, folder, browser: "HTML", profile: file.name });
+      return trail;
+    };
+    for (const heading of Array.from(document.querySelectorAll("h3"))) {
+      const trail = [...trailFor(heading), heading.textContent?.trim() || "文件夹"];
+      folderPaths.set(JSON.stringify(trail), trail);
     }
-    setPreview({ source: `HTML · ${file.name}`, entries, folders: folders.size, folderPaths: [...folderPaths.values()], browser: "HTML", profile: file.name });
+    for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
+      const url = anchor.getAttribute("href") || "";
+      if (!/^https?:\/\//i.test(url)) continue;
+      const trail = trailFor(anchor);
+      const folder = trail.join(" / ");
+      if (folder) folderPaths.set(JSON.stringify(trail), trail);
+      entries.push({ name: anchor.textContent?.trim() || url, url, folder, folderPath: trail, browser: "HTML", profile: file.name });
+    }
+    const paths = [...folderPaths.values()];
+    setPreview({ source: `HTML · ${file.name}`, entries, folders: paths.length, folderPaths: paths, browser: "HTML", profile: file.name });
+    setSelectedImportFolders([...new Set(paths.flatMap(path => path.map((_, index) => JSON.stringify(path.slice(0, index + 1)))))]);
+    setImportRootSelected(true);
+  };
+  const importPaths = useMemo(() => {
+    const paths = new Map<string, string[]>();
+    for (const path of preview?.folderPaths || []) for (let depth = 1; depth <= path.length; depth++) paths.set(JSON.stringify(path.slice(0, depth)), path.slice(0, depth));
+    for (const entry of preview?.entries || []) {
+      const path = entry.folderPath || (entry.folder ? entry.folder.split(" / ") : []);
+      for (let depth = 1; depth <= path.length; depth++) paths.set(JSON.stringify(path.slice(0, depth)), path.slice(0, depth));
+    }
+    return [...paths.values()];
+  }, [preview]);
+  const selectedImportKeys = useMemo(() => new Set(selectedImportFolders), [selectedImportFolders]);
+  const selectedImportEntries = useMemo(() => (preview?.entries || []).filter(entry => {
+    const path = entry.folderPath || (entry.folder ? entry.folder.split(" / ") : []);
+    return path.length ? selectedImportKeys.has(JSON.stringify(path)) : importRootSelected;
+  }), [preview, selectedImportKeys, importRootSelected]);
+  const selectedImportPaths = useMemo(() => importPaths.filter(path => selectedImportKeys.has(JSON.stringify(path))), [importPaths, selectedImportKeys]);
+  const importFolderCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const entry of preview?.entries || []) {
+      const path = entry.folderPath || (entry.folder ? entry.folder.split(" / ") : []);
+      if (path.length) { const key = JSON.stringify(path); counts.set(key, (counts.get(key) || 0) + 1); }
+    }
+    return counts;
+  }, [preview]);
+  const importRootCount = (preview?.entries || []).filter(entry => !(entry.folderPath || (entry.folder ? entry.folder.split(" / ") : [])).length).length;
+  const toggleImportFolder = (path: string[]) => {
+    const descendants = importPaths.filter(candidate => candidate.length >= path.length && path.every((part, index) => candidate[index] === part)).map(candidate => JSON.stringify(candidate));
+    setSelectedImportFolders(previous => descendants.every(key => previous.includes(key)) ? previous.filter(key => !descendants.includes(key)) : [...new Set([...previous, ...descendants])]);
   };
   const existingUrls = useMemo(() => new Set([...data.websites.map(w => normalizeUrl(w.url)), ...secrets.map(s => normalizeUrl(s.url))]), [data.websites, secrets]);
   const duplicateCount = useMemo(() => {
     if (!preview) return 0;
     const seen = new Set(existingUrls);
     let count = 0;
-    for (const entry of preview.entries) {
+    for (const entry of selectedImportEntries) {
       const url = normalizeUrl(entry.url);
       if (seen.has(url)) count++;
       else seen.add(url);
     }
     return count;
-  }, [preview, existingUrls]);
+  }, [selectedImportEntries, existingUrls]);
   const commitImport = async () => {
-    if (!preview || !keyRef.current) return;
+    if (!preview || !keyRef.current || (!selectedImportEntries.length && !selectedImportPaths.length)) return;
     try {
       setBusy(true); let added = 0, skipped = 0;
       const seen = new Set(existingUrls);
       const rows: { id: string; kind: string; payload: string; nonce: string }[] = [];
-      for (const entry of preview.entries) {
+      for (const entry of selectedImportEntries) {
         const normalized = normalizeUrl(entry.url);
         if (seen.has(normalized) && duplicateMode !== "keep") {
           if (duplicateMode === "merge") {
@@ -310,13 +356,13 @@ export default function Portal() {
           skipped++; continue;
         }
         const id = crypto.randomUUID();
-        const cipher = await encrypt(keyRef.current, { id, kind: "imported", ...entry, createdAt: new Date().toISOString() });
+        const cipher = await encrypt(keyRef.current, { id, kind: "imported", name: entry.name, url: entry.url, folder: entry.folder, browser: entry.browser, profile: entry.profile, createdAt: new Date().toISOString() });
         rows.push({ id, kind: "imported", ...cipher });
         seen.add(normalized); added++;
       }
       const afterImport = await mutate("protected.bulk", { rows });
-      await migrateProtected(afterImport.protectedRows, keyRef.current, preview.folderPaths.map(parts => ({ kind: "imported", parts: [preview.browser, preview.profile, ...parts] })));
-      await mutate("batch.save", { source: preview.source.split(" · ")[0], scanned: preview.entries.length, added, skipped });
+      await migrateProtected(afterImport.protectedRows, keyRef.current, selectedImportPaths.map(parts => ({ kind: "imported", parts: [preview.browser, preview.profile, ...parts] })));
+      await mutate("batch.save", { source: preview.source.split(" · ")[0], scanned: selectedImportEntries.length, added, skipped });
       setPreview(null); setModal(null); setSection("Imported"); notify(`导入完成：${added} 新增，${skipped} 跳过`);
     } catch (e) { notify((e as Error).message); } finally { setBusy(false); }
   };
@@ -436,26 +482,23 @@ export default function Portal() {
   };
 
   return <div className="app-shell">
-    <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
+    <button className="nav-fab" aria-label={mobileNav ? "关闭导航" : "打开导航"} aria-expanded={mobileNav} aria-controls="portal-navigation" onClick={() => setMobileNav(value => !value)}><Menu size={21}/></button>
+    {mobileNav && <><button className="nav-backdrop" aria-label="关闭导航" onClick={() => setMobileNav(false)}/><aside id="portal-navigation" className="sidebar nav-popover">
       <div className="brand"><div className="brand-mark">H<span>✦</span></div><div><strong>HNova</strong><small>个人门户</small></div></div>
-      <div className="workspace-label">工作区 <ChevronDown size={13} /></div>
       <nav className="navigation">{nav.map(item => { const Icon = icons[item]; return <button key={item} className={`nav-link ${section === item ? "active" : ""}`} onClick={() => enter(item)}><Icon size={17} strokeWidth={1.8}/><span>{sectionLabels[item]}</span>{(item === "Imported" || item === "Private") && <LockKeyhole className="nav-lock" size={12}/>}</button>; })}</nav>
-      <div className="sidebar-bottom"><div className="sidebar-note"><div className="tiny-orbit"><Sparkles size={16}/></div><strong>你的数字入口</strong><p>常用入口，尽在一处。</p></div><div className="sidebar-footer"><span className="status-dot"/> 本地工作区 <span className="version">v0.1</span></div></div>
-    </aside>
+    </aside></>}
     <main className="main">
-      <header className="topbar"><button className="mobile-menu icon-btn" onClick={() => setMobileNav(v => !v)}><Menu size={19}/></button><div className="breadcrumb"><span>工作区</span><span className="crumb-slash">/</span><strong>{sectionLabels[section]}</strong></div><div className="top-actions"><button className="top-search" onClick={() => setPalette(true)}><Search size={15}/><span>搜索所有内容...</span><kbd>Ctrl K</kbd></button><button className="icon-btn top-icon" title="切换主题" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={18}/> : <Moon size={18}/>}</button><div className="avatar">H</div></div></header>
-      <div className="content">
+      <header className="topbar"><div className="breadcrumb"><span>工作区</span><span className="crumb-slash">/</span><strong>{sectionLabels[section]}</strong></div><div className="top-actions"><button className="icon-btn" title="搜索所有内容 (Ctrl+K)" aria-label="搜索所有内容" onClick={() => setPalette(true)}><Search size={18}/></button><button className="icon-btn" title="切换主题" aria-label="切换主题" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={18}/> : <Moon size={18}/>}</button></div></header>
+      <div className={`content ${section === "Websites" || section === "Imported" || section === "Private" ? "content-bookmarks" : ""}`}>
         {error && <div className="alert">{error}</div>}
         {loading ? <div className="loading">正在加载门户...</div> : <>
-          <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line"/> HNOVA / {sectionLabels[section]}</div><h1>{pageTitles[section]}</h1><p>{pageSub[section]}</p></div><div className="heading-action">
-
-          {section === "Services" && <Btn kind="primary" onClick={() => openForm("service")}><Plus size={16}/> 添加服务</Btn>}{section === "Private" && keyReady && <Btn kind="primary" onClick={() => openForm("private")}><Plus size={16}/> 添加私密网址</Btn>}{section === "Imported" && keyReady && <Btn kind="primary" onClick={discover}><ArrowDownToLine size={16}/> 导入书签</Btn>}</div></div>
+          {section === "Home" && <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line"/> HNOVA / {sectionLabels[section]}</div><h1>{pageTitles[section]}</h1><p>{pageSub[section]}</p></div></div>}
 
           {section === "Home" && <>
             <div className="hero-search" onClick={() => setPalette(true)}><Search size={21}/><span>想去哪里？</span><kbd>Ctrl + K</kbd></div>
-            <div className="stats-grid"><div className="stat-card"><span className="stat-icon blue"><Globe2 size={19}/></span><div><strong>{data.websites.length}</strong><span>网站</span></div><ArrowRight size={17}/></div><div className="stat-card"><span className="stat-icon purple"><ServerIcon size={19}/></span><div><strong>{data.services.length}</strong><span>服务</span></div><ArrowRight size={17}/></div><div className="stat-card"><span className="stat-icon amber"><LockKeyhole size={19}/></span><div><strong>{keyReady ? secrets.length : "—"}</strong><span>加密网址</span></div><ArrowRight size={17}/></div></div>
-            <div className="home-grid"><section className="panel favorites-panel"><div className="panel-head"><div><div className="panel-kicker">快捷访问</div><h2>收藏</h2></div><button className="text-link" onClick={() => enter("Websites")}>查看全部 <ArrowRight size={14}/></button></div>{topSites.length ? <div className="favorite-grid">{topSites.map(w => <a key={w.id} href={w.url} target="_blank" rel="noopener noreferrer" className="favorite-item"><SiteIcon url={w.url} icon={w.icon}/><strong>{w.name}</strong><span>{host(w.url)}</span></a>)}</div> : <EmptyState icon={Heart} title="还没有收藏" text="收藏常用网站，快速访问。" action={<Btn onClick={() => enter("Websites")}>浏览网站</Btn>}/>}</section><section className="panel services-panel"><div className="panel-head"><div><div className="panel-kicker">本地网络</div><h2>我的服务</h2></div><button className="text-link" onClick={() => enter("Services")}>查看全部 <ArrowRight size={14}/></button></div>{data.services.length ? <div className="compact-list">{data.services.slice(0, 5).map(s => localDesktop(s) ? <button key={s.id} onClick={() => enter("Services")}><span className="mini-icon"><ServerIcon size={15}/></span><span className="compact-name">{s.name}<small>桌面应用 · 前往服务页启动</small></span><ArrowRight size={14}/></button> : <a key={s.id} href={serviceUrl(s)} target="_blank" rel="noopener noreferrer"><span className="mini-icon"><ServerIcon size={15}/></span><span className="compact-name">{s.name}<small>{s.host}{s.port ? `:${s.port}` : ""}</small></span><ExternalLink size={14}/></a>)}</div> : <EmptyState icon={ServerIcon} title="还没有服务" text="添加你的 Homelab 和本地工具。" action={<Btn onClick={() => enter("Services")}>添加服务</Btn>}/>}</section></div>
-            <div className="home-grid lower-grid"><section className="panel protected-teaser"><div className="panel-head"><div><div className="panel-kicker">加密区域</div><h2>你的私密空间</h2></div><ShieldCheck size={18}/></div><div className="protected-links"><button onClick={() => enter("Imported")}><span className="protected-icon"><ArrowDownToLine size={17}/></span><span><strong>已导入</strong><small>{keyReady ? `${secrets.filter(s => s.kind === "imported").length} 条书签` : "加密书签"}</small></span>{keyReady ? <ArrowRight size={16}/> : <LockKeyhole size={15}/>}</button><button onClick={() => enter("Private")}><span className="protected-icon"><KeyRound size={17}/></span><span><strong>私密保险库</strong><small>{keyReady ? `${secrets.filter(s => s.kind === "private").length} 条网址` : "加密网址"}</small></span>{keyReady ? <ArrowRight size={16}/> : <LockKeyhole size={15}/>}</button></div></section><section className="panel recent-panel"><div className="panel-head"><div><div className="panel-kicker">最新动态</div><h2>最近添加</h2></div><Activity size={18}/></div>{data.websites.length ? <div className="compact-list">{[...data.websites].sort((a,b) => b.createdAt.localeCompare(a.createdAt)).slice(0,3).map(w => <a key={w.id} href={w.url} target="_blank" rel="noopener noreferrer"><SiteIcon url={w.url} icon={w.icon} className="mini-icon"/><span className="compact-name">{w.name}<small>{host(w.url)}</small></span><ExternalLink size={14}/></a>)}</div> : <div className="recent-empty">最近添加的内容会显示在这里。</div>}</section></div>
+            <div className="stats-grid"><button type="button" className="stat-card" aria-label="查看网站" onClick={() => enter("Websites")}><span className="stat-icon blue"><Globe2 size={19}/></span><div><strong>{data.websites.length}</strong><span>网站</span></div><ArrowRight size={17}/></button><button type="button" className="stat-card" aria-label="查看服务" onClick={() => enter("Services")}><span className="stat-icon purple"><ServerIcon size={19}/></span><div><strong>{data.services.length}</strong><span>服务</span></div><ArrowRight size={17}/></button><button type="button" className="stat-card" aria-label="查看加密网址" onClick={() => enter("Private")}><span className="stat-icon amber"><LockKeyhole size={19}/></span><div><strong>{keyReady ? secrets.length : "—"}</strong><span>加密网址</span></div><ArrowRight size={17}/></button></div>
+            <div className="home-grid"><section className="panel favorites-panel"><div className="panel-head"><div><div className="panel-kicker">快捷访问</div><h2>收藏</h2></div><button className="text-link" onClick={() => enter("Websites")}>查看全部 <ArrowRight size={14}/></button></div>{topSites.length ? <div className="favorite-grid">{topSites.map(w => <a key={w.id} href={w.url} target="_blank" rel="noopener noreferrer" className="favorite-item"><SiteIcon url={w.url} icon={w.icon} websiteId={w.id}/><strong>{w.name}</strong><span>{host(w.url)}</span></a>)}</div> : <EmptyState icon={Heart} title="还没有收藏" text="收藏常用网站，快速访问。" action={<Btn onClick={() => enter("Websites")}>浏览网站</Btn>}/>}</section><section className="panel services-panel"><div className="panel-head"><div><div className="panel-kicker">本地网络</div><h2>我的服务</h2></div><button className="text-link" onClick={() => enter("Services")}>查看全部 <ArrowRight size={14}/></button></div>{data.services.length ? <div className="compact-list">{data.services.slice(0, 5).map(s => localDesktop(s) ? <button key={s.id} onClick={() => enter("Services")}><span className="mini-icon"><ServerIcon size={15}/></span><span className="compact-name">{s.name}<small>桌面应用 · 前往服务页启动</small></span><ArrowRight size={14}/></button> : <a key={s.id} href={serviceUrl(s)} target="_blank" rel="noopener noreferrer"><span className="mini-icon"><ServerIcon size={15}/></span><span className="compact-name">{s.name}<small>{s.host}{s.port ? `:${s.port}` : ""}</small></span><ExternalLink size={14}/></a>)}</div> : <EmptyState icon={ServerIcon} title="还没有服务" text="添加你的 Homelab 和本地工具。" action={<Btn onClick={() => enter("Services")}>添加服务</Btn>}/>}</section></div>
+            <div className="home-grid lower-grid"><section className="panel protected-teaser"><div className="panel-head"><div><div className="panel-kicker">加密区域</div><h2>你的私密空间</h2></div><ShieldCheck size={18}/></div><div className="protected-links"><button onClick={() => enter("Imported")}><span className="protected-icon"><ArrowDownToLine size={17}/></span><span><strong>已导入</strong><small>{keyReady ? `${secrets.filter(s => s.kind === "imported").length} 条书签` : "加密书签"}</small></span>{keyReady ? <ArrowRight size={16}/> : <LockKeyhole size={15}/>}</button><button onClick={() => enter("Private")}><span className="protected-icon"><KeyRound size={17}/></span><span><strong>私密保险库</strong><small>{keyReady ? `${secrets.filter(s => s.kind === "private").length} 条网址` : "加密网址"}</small></span>{keyReady ? <ArrowRight size={16}/> : <LockKeyhole size={15}/>}</button></div></section><section className="panel recent-panel"><div className="panel-head"><div><div className="panel-kicker">最新动态</div><h2>最近添加</h2></div><Activity size={18}/></div>{data.websites.length ? <div className="compact-list">{[...data.websites].sort((a,b) => b.createdAt.localeCompare(a.createdAt)).slice(0,3).map(w => <a key={w.id} href={w.url} target="_blank" rel="noopener noreferrer"><SiteIcon url={w.url} icon={w.icon} websiteId={w.id} className="mini-icon"/><span className="compact-name">{w.name}<small>{host(w.url)}</small></span><ExternalLink size={14}/></a>)}</div> : <div className="recent-empty">最近添加的内容会显示在这里。</div>}</section></div>
           </>}
 
           {section === "Websites" && <BookmarkWorkspace
@@ -473,12 +516,13 @@ export default function Portal() {
           />}
 
           {section === "Services" && data.services.length > 0 && <ServiceOverview services={data.services} notify={notify}/>}
-          {section === "Services" && <><div className="services-intro"><div><span className="panel-kicker">基础设施</span><h2>设备与服务入口</h2><p>集中管理每个本地地址。</p></div><Btn onClick={() => openForm("server")}><Plus size={15}/> 添加设备</Btn></div>{data.servers.length === 0 && data.services.length === 0 ? <EmptyState icon={HardDrive} title="从这里开始管理网络" text="添加设备或服务，建立你的入口。" action={<Btn kind="primary" onClick={() => openForm("server")}>添加设备</Btn>}/> : <div className="service-groups">{data.servers.map(server => <div className="device-panel" key={server.id}><div className="device-head"><span className="device-icon"><HardDrive size={20}/></span><div><h3>{server.name}</h3><p>{server.host} <span>·</span> {server.environment === "Home" ? "家庭" : server.environment}</p></div><button className="icon-btn" title="编辑设备" onClick={() => openForm("server", server)}><MoreHorizontal size={18}/></button></div><div className="device-services">{data.services.filter(s => s.serverId === server.id).map(s => <ServiceRow key={s.id} service={s} edit={() => openForm("service", s)} notify={notify}/>)}<button className="add-child" onClick={() => openForm("service", { serverId: server.id, host: server.host })}><Plus size={15}/> 添加服务</button></div></div>)}{data.services.filter(s => !s.serverId).length > 0 && <div className="device-panel"><div className="device-head"><span className="device-icon"><Compass size={20}/></span><div><h3>独立服务</h3><p>未关联设备的服务入口</p></div></div><div className="device-services">{data.services.filter(s => !s.serverId).map(s => <ServiceRow key={s.id} service={s} edit={() => openForm("service", s)} notify={notify}/>)}</div></div>}</div>}</>}
+          {section === "Services" && <><div className="services-intro"><div><span className="panel-kicker">基础设施</span><h2>设备与服务入口</h2><p>集中管理每个本地地址。</p></div><div className="services-intro-actions"><Btn onClick={() => openForm("server")}><Plus size={15}/> 添加设备</Btn><Btn kind="primary" onClick={() => openForm("service")}><Plus size={15}/> 添加服务</Btn></div></div>{data.servers.length === 0 && data.services.length === 0 ? <EmptyState icon={HardDrive} title="从这里开始管理网络" text="添加设备或服务，建立你的入口。" action={<Btn kind="primary" onClick={() => openForm("server")}>添加设备</Btn>}/> : <div className="service-groups">{data.servers.map(server => <div className="device-panel" key={server.id}><div className="device-head"><span className="device-icon"><HardDrive size={20}/></span><div><h3>{server.name}</h3><p>{server.host} <span>·</span> {server.environment === "Home" ? "家庭" : server.environment}</p></div><button className="icon-btn" title="编辑设备" onClick={() => openForm("server", server)}><MoreHorizontal size={18}/></button></div><div className="device-services">{data.services.filter(s => s.serverId === server.id).map(s => <ServiceRow key={s.id} service={s} edit={() => openForm("service", s)} notify={notify}/>)}<button className="add-child" onClick={() => openForm("service", { serverId: server.id, host: server.host })}><Plus size={15}/> 添加服务</button></div></div>)}{data.services.filter(s => !s.serverId).length > 0 && <div className="device-panel"><div className="device-head"><span className="device-icon"><Compass size={20}/></span><div><h3>独立服务</h3><p>未关联设备的服务入口</p></div></div><div className="device-services">{data.services.filter(s => !s.serverId).map(s => <ServiceRow key={s.id} service={s} edit={() => openForm("service", s)} notify={notify}/>)}</div></div>}</div>}</>}
 
           {(section === "Imported" || section === "Private") && (!keyReady
             ? <div className="locked-panel"><div className="locked-glow"><LockKeyhole size={32}/></div><span className="panel-kicker">端到端加密</span><h2>加密区域已锁定</h2><p>输入主密码即可访问已导入书签和私密网址。主密码不会离开此浏览器。</p><Btn kind="primary" onClick={() => setModal("unlock")}><KeyRound size={16}/> {data.vault ? "解锁加密区域" : "设置主密码"}</Btn></div>
             : section === "Imported"
               ? <BookmarkWorkspace key="imported" area="imported" folders={areaFolders("imported")} items={imported} notify={notify}
+                  onImport={discover}
                   onCreateFolder={(name, parentId) => createFolder("imported", name, parentId)}
                   onRenameFolder={(id, name) => renameFolder("imported", id, name)}
                   onMoveFolder={(id, parentId) => moveFolder("imported", id, parentId)}
@@ -513,10 +557,10 @@ export default function Portal() {
       </div>
     </main>
 
-    {palette && <div className="overlay palette-overlay" onMouseDown={e => { if (e.target === e.currentTarget) setPalette(false); }}><div className="palette"><div className="palette-input"><Search size={20}/><input autoFocus placeholder="搜索网站、服务和已解锁的网址..." value={paletteQuery} onChange={e => setPaletteQuery(e.target.value)}/><kbd>ESC</kbd></div><div className="palette-results">{searchResults(paletteQuery).length ? searchResults(paletteQuery).map(item => <a key={`${item.type}-${item.id}`} href={item.url} target="_blank" rel="noopener noreferrer" onClick={() => setPalette(false)}>{item.type === "Website" ? <SiteIcon url={item.url} icon={item.icon} className="mini-icon"/> : <span className="mini-icon">{item.type === "Service" ? <ServerIcon size={16}/> : item.type === "Private" ? <KeyRound size={16}/> : <Globe2 size={16}/>}</span>}<span><strong>{item.name}</strong><small>{item.subtitle}</small></span><Tag>{resultLabels[item.type] || item.type}</Tag><ArrowRight size={15}/></a>) : <div className="palette-empty">没有找到结果。</div>}</div><div className="palette-footer"><span><kbd>↵</kbd> 打开结果</span><span><kbd>ESC</kbd> 关闭</span></div></div></div>}
+    {palette && <div className="overlay palette-overlay" onMouseDown={e => { if (e.target === e.currentTarget) setPalette(false); }}><div className="palette"><div className="palette-input"><Search size={20}/><input autoFocus placeholder="搜索网站、服务和已解锁的网址..." value={paletteQuery} onChange={e => setPaletteQuery(e.target.value)}/><kbd>ESC</kbd></div><div className="palette-results">{searchResults(paletteQuery).length ? searchResults(paletteQuery).map(item => <a key={`${item.type}-${item.id}`} href={item.url} target="_blank" rel="noopener noreferrer" onClick={() => setPalette(false)}>{item.type === "Website" ? <SiteIcon url={item.url} icon={item.icon} websiteId={item.id} className="mini-icon"/> : <span className="mini-icon">{item.type === "Service" ? <ServerIcon size={16}/> : item.type === "Private" ? <KeyRound size={16}/> : <Globe2 size={16}/>}</span>}<span><strong>{item.name}</strong><small>{item.subtitle}</small></span><Tag>{resultLabels[item.type] || item.type}</Tag><ArrowRight size={15}/></a>) : <div className="palette-empty">没有找到结果。</div>}</div><div className="palette-footer"><span><kbd>↵</kbd> 打开结果</span><span><kbd>ESC</kbd> 关闭</span></div></div></div>}
 
     {modal && <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget) setModal(null); }}><div className={`dialog ${modal === "import" ? "import-dialog" : ""}`}><div className="dialog-head"><div><span className="panel-kicker">HNOVA PORTAL</span><h2>{modal === "unlock" ? data.vault ? "解锁加密区域" : "创建保险库" : modal === "import" ? "导入书签" : `${editing?.id ? "编辑" : "添加"}${formLabels[modal] || "项目"}`}</h2></div><button className="icon-btn" onClick={() => setModal(null)}><X size={19}/></button></div>
-      {modal === "unlock" ? <form onSubmit={unlock} className="dialog-body"><p className="dialog-hint">{data.vault ? "输入主密码，在当前浏览器中解密加密网址。" : "设置主密码并妥善保管；忘记后无法恢复。"}</p><Field label="主密码"><input name="password" type="password" minLength={8} required autoFocus autoComplete="off"/></Field>{!data.vault && <Field label="确认主密码"><input name="confirm" type="password" minLength={8} required autoComplete="off"/></Field>}<div className="dialog-actions"><Btn onClick={() => setModal(null)}>取消</Btn><Btn kind="primary" type="submit" disabled={busy}>{busy ? "处理中..." : data.vault ? "解锁" : "创建保险库"}</Btn></div></form> : modal === "import" ? <div className="dialog-body"><p className="dialog-hint">选择本机浏览器配置档案或导出的 HTML 书签文件。导入前可先预览。</p><div className="import-source-list">{profiles.map(p => <button key={`${p.browser}-${p.profile}`} onClick={() => readProfile(p)}><Globe2 size={18}/><span><strong>{p.browser}</strong><small>{p.label} · {p.profile}</small></span><ArrowRight size={16}/></button>)}<label className="html-upload"><FileUp size={18}/><span><strong>HTML 书签文件</strong><small>选择导出文件</small></span><input type="file" accept=".html,.htm,text/html" onChange={e => { const file = e.target.files?.[0]; if (file) readHtml(file).catch(err => notify(err.message)); }}/><ArrowRight size={16}/></label></div>{preview && <div className="preview-box"><div className="preview-head"><strong>{preview.source}</strong><span>预览</span></div><div className="preview-stats"><div><strong>{preview.entries.length}</strong><span>书签</span></div><div><strong>{preview.folders}</strong><span>文件夹</span></div><div><strong>{duplicateCount}</strong><span>重复项</span></div></div><div className="preview-samples">{preview.entries.slice(0,4).map((e,i) => <div key={i}><span>{e.name}</span><small>{e.folder || "书签"}</small></div>)}</div><Field label="网址已存在时"><select value={duplicateMode} onChange={e => setDuplicateMode(e.target.value as typeof duplicateMode)}><option value="skip">跳过重复项</option><option value="keep">两条都保留</option><option value="merge">合并已导入的重复项</option></select></Field></div>}<div className="dialog-actions"><Btn onClick={() => { setModal(null); setPreview(null); }}>取消</Btn><Btn kind="primary" onClick={commitImport} disabled={!preview || busy || (preview.entries.length === 0 && preview.folderPaths.length === 0)}>{busy ? "正在导入..." : "导入收件箱"}</Btn></div></div> : <form onSubmit={saveForm} className="dialog-body"><div className="form-grid"><Field label="名称"><input name="name" defaultValue={String(editing?.name || "")} required autoFocus placeholder="例如 GitHub"/></Field>{modal === "service" ? <><Field label="设备"><select name="serverId" defaultValue={String(editing?.serverId || "")}><option value="">独立服务</option>{data.servers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field><Field label="主机地址"><input name="host" defaultValue={String(editing?.host || "")} placeholder="192.168.1.100"/></Field><Field label="端口"><input name="port" type="number" min="1" max="65535" defaultValue={String(editing?.port || "")} placeholder="8096"/></Field><Field label="协议"><select name="protocol" defaultValue={String(editing?.protocol || "http")}><option value="http">HTTP</option><option value="https">HTTPS</option></select></Field><Field label="路径"><input name="path" defaultValue={String(editing?.path || "")} placeholder="/dashboard"/></Field></> : modal === "server" ? <><Field label="主机地址"><input name="host" defaultValue={String(editing?.host || "")} required placeholder="192.168.1.100"/></Field><Field label="环境"><input name="environment" defaultValue={String(editing?.environment || "家庭")} placeholder="家庭"/></Field></> : <Field label="URL"><input name="url" type="url" defaultValue={String(editing?.url || "")} required placeholder="https://example.com"/></Field>}{modal === "service" && <><Field label="环境"><input name="environment" defaultValue={String(editing?.environment || "家庭")} placeholder="开发"/></Field><Field label="标签（用逗号分隔）"><input name="tags" defaultValue={Array.isArray(editing?.tags) ? editing.tags.join(", ") : ""} placeholder="AI、工具"/></Field><Field label="别名"><input name="alias" defaultValue={String(editing?.alias || "")} placeholder="gh"/></Field></>}{(modal === "website" || modal === "private") && <Field label="文件夹"><select name="folderId" defaultValue={String(editing?.folderId || "")}><option value="">根目录</option>{areaFolders(modal === "website" ? "website" : "private").map(folder => <option key={folder.id} value={folder.id}>{folderPath(folder, areaFolders(modal === "website" ? "website" : "private"))}</option>)}</select></Field>}</div>{modal === "website" && <Field label="图标 URL（可选）"><input name="icon" type="url" defaultValue={String(editing?.icon || "")} placeholder="https://example.com/favicon.ico"/></Field>}<Field label="描述"><textarea name="description" defaultValue={String(editing?.description || "")} rows={3} placeholder="简要说明..."/></Field>{modal === "private" && <Field label="私密备注"><textarea name="notes" defaultValue={String(editing?.notes || "")} rows={3}/></Field>}{modal === "website" && <label className="checkbox"><input name="favorite" type="checkbox" defaultChecked={!!editing?.favorite}/><Heart size={16}/> 加入收藏</label>}<div className="dialog-actions">{Boolean(editing?.id) && <Btn kind="danger" onClick={() => { const current = modal; setModal(null); doDelete(current === "private" ? "protected.delete" : `${current}.delete`, String(editing?.id)); }}><Trash2 size={15}/> 删除</Btn>}<span className="action-spacer"/><Btn onClick={() => setModal(null)}>取消</Btn><Btn kind="primary" type="submit" disabled={busy}>{busy ? "正在保存..." : "保存"}</Btn></div></form>}
+      {modal === "unlock" ? <form onSubmit={unlock} className="dialog-body"><p className="dialog-hint">{data.vault ? "输入主密码，在当前浏览器中解密加密网址。" : "设置主密码并妥善保管；忘记后无法恢复。"}</p><Field label="主密码"><input name="password" type="password" minLength={8} required autoFocus autoComplete="off"/></Field>{!data.vault && <Field label="确认主密码"><input name="confirm" type="password" minLength={8} required autoComplete="off"/></Field>}<div className="dialog-actions"><Btn onClick={() => setModal(null)}>取消</Btn><Btn kind="primary" type="submit" disabled={busy}>{busy ? "处理中..." : data.vault ? "解锁" : "创建保险库"}</Btn></div></form> : modal === "import" ? <div className="dialog-body"><p className="dialog-hint">选择本机浏览器配置档案或导出的 HTML 书签文件。导入前可先预览。</p><div className="import-source-list">{profiles.map(p => <button key={`${p.browser}-${p.profile}`} onClick={() => readProfile(p)}><Globe2 size={18}/><span><strong>{p.browser}</strong><small>{p.label} · {p.profile}</small></span><ArrowRight size={16}/></button>)}<label className="html-upload"><FileUp size={18}/><span><strong>HTML 书签文件</strong><small>选择导出文件</small></span><input type="file" accept=".html,.htm,text/html" onChange={e => { const file = e.target.files?.[0]; if (file) readHtml(file).catch(err => notify(err.message)); }}/><ArrowRight size={16}/></label></div>{preview && <div className="preview-box"><div className="preview-head"><strong>{preview.source}</strong><span>预览</span></div><div className="preview-stats"><div><strong>{selectedImportEntries.length} / {preview.entries.length}</strong><span>已选书签</span></div><div><strong>{selectedImportPaths.length} / {importPaths.length}</strong><span>已选文件夹</span></div><div><strong>{duplicateCount}</strong><span>重复项</span></div></div><ImportFolderSelection paths={importPaths} selected={selectedImportFolders} rootSelected={importRootSelected} rootCount={importRootCount} counts={importFolderCounts} onToggle={toggleImportFolder} onRootToggle={() => setImportRootSelected(value => !value)} onAll={value => { setSelectedImportFolders(value ? importPaths.map(path => JSON.stringify(path)) : []); setImportRootSelected(value); }}/><div className="preview-samples">{selectedImportEntries.slice(0,4).map((e,i) => <div key={i}><span>{e.name}</span><small>{e.folder || "书签"}</small></div>)}</div><Field label="网址已存在时"><select value={duplicateMode} onChange={e => setDuplicateMode(e.target.value as typeof duplicateMode)}><option value="skip">跳过重复项</option><option value="keep">两条都保留</option><option value="merge">合并已导入的重复项</option></select></Field></div>}<div className="dialog-actions"><Btn onClick={() => { setModal(null); setPreview(null); }}>取消</Btn><Btn kind="primary" onClick={commitImport} disabled={!preview || busy || (selectedImportEntries.length === 0 && selectedImportPaths.length === 0)}>{busy ? "正在导入..." : "导入收件箱"}</Btn></div></div> : <form onSubmit={saveForm} className="dialog-body"><div className="form-grid"><Field label="名称"><input name="name" defaultValue={String(editing?.name || "")} required autoFocus placeholder="例如 GitHub"/></Field>{modal === "service" ? <><Field label="设备"><select name="serverId" defaultValue={String(editing?.serverId || "")}><option value="">独立服务</option>{data.servers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field><Field label="主机地址"><input name="host" defaultValue={String(editing?.host || "")} placeholder="192.168.1.100"/></Field><Field label="端口"><input name="port" type="number" min="1" max="65535" defaultValue={String(editing?.port || "")} placeholder="8096"/></Field><Field label="协议"><select name="protocol" defaultValue={String(editing?.protocol || "http")}><option value="http">HTTP</option><option value="https">HTTPS</option></select></Field><Field label="路径"><input name="path" defaultValue={String(editing?.path || "")} placeholder="/dashboard"/></Field></> : modal === "server" ? <><Field label="主机地址"><input name="host" defaultValue={String(editing?.host || "")} required placeholder="192.168.1.100"/></Field><Field label="环境"><input name="environment" defaultValue={String(editing?.environment || "家庭")} placeholder="家庭"/></Field></> : <Field label="URL"><input name="url" type="url" defaultValue={String(editing?.url || "")} required placeholder="https://example.com"/></Field>}{modal === "service" && <><Field label="环境"><input name="environment" defaultValue={String(editing?.environment || "家庭")} placeholder="开发"/></Field><Field label="标签（用逗号分隔）"><input name="tags" defaultValue={Array.isArray(editing?.tags) ? editing.tags.join(", ") : ""} placeholder="AI、工具"/></Field><Field label="别名"><input name="alias" defaultValue={String(editing?.alias || "")} placeholder="gh"/></Field></>}{(modal === "website" || modal === "private") && <Field label="文件夹"><select name="folderId" defaultValue={String(editing?.folderId || "")}><option value="">根目录</option>{areaFolders(modal === "website" ? "website" : "private").map(folder => <option key={folder.id} value={folder.id}>{folderPath(folder, areaFolders(modal === "website" ? "website" : "private"))}</option>)}</select></Field>}</div>{modal === "website" && <Field label="图标 URL（可选）"><input name="icon" type="url" defaultValue={String(editing?.icon || "")} placeholder="https://example.com/favicon.ico"/></Field>}<Field label="描述"><textarea name="description" defaultValue={String(editing?.description || "")} rows={3} placeholder="简要说明..."/></Field>{modal === "private" && <Field label="私密备注"><textarea name="notes" defaultValue={String(editing?.notes || "")} rows={3}/></Field>}{modal === "website" && <label className="checkbox"><input name="favorite" type="checkbox" defaultChecked={!!editing?.favorite}/><Heart size={16}/> 加入收藏</label>}<div className="dialog-actions">{Boolean(editing?.id) && <Btn kind="danger" onClick={() => { const current = modal; setModal(null); doDelete(current === "private" ? "protected.delete" : `${current}.delete`, String(editing?.id)); }}><Trash2 size={15}/> 删除</Btn>}<span className="action-spacer"/><Btn onClick={() => setModal(null)}>取消</Btn><Btn kind="primary" type="submit" disabled={busy}>{busy ? "正在保存..." : "保存"}</Btn></div></form>}
     </div></div>}
     {toast && <div className="toast"><Check size={16}/>{toast}{undoId && <button className="toast-undo" onClick={() => void restoreTrash(undoId)}>撤销</button>}</div>}
   </div>;
