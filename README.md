@@ -20,7 +20,7 @@ npm start
 
 生产地址为 `http://127.0.0.1:43100`。SQLite 默认位于 `data/portal.db`，可用 `HNOVA_DB_PATH` 指定绝对路径。请定期备份数据库和主密码；主密码丢失后加密数据无法恢复。
 
-一键启动脚本会自动补充 HNova Portal、Atlas、Muse、Play、Reader、Archive、TrainEcho 七个本机入口。手动使用 `npm run dev` 或 `npm start` 时，可运行 `npm run seed:services` 添加入口；脚本只补缺少的服务，不覆盖已编辑的记录。GitHub 源码压缩包只包含 Portal 项目；其他六个项目需要分别放在 Portal 同级目录，才能使用网页上的启动按钮。
+一键启动脚本会自动补充 HNova Portal、Atlas、Muse、Play、Reader、Archive、TrainEcho、HGame 游戏库八个本机入口。手动使用 `npm run dev` 或 `npm start` 时，可运行 `npm run seed:services` 添加入口；脚本只补缺少的服务，不覆盖已编辑的记录。GitHub 源码压缩包只包含 Portal 项目；其他七个项目需要分别放在 Portal 同级目录，才能使用网页上的启动按钮。
 
 `node_modules` 由 `npm ci` 自动安装，不包含在 GitHub 源码压缩包中。当前 Windows 安装约 417 MiB，主要是 Next.js 及其原生编译组件、图标库和 TypeScript。源码包运行时需要本机完成构建，因此请保留依赖目录；再次启动不会重复安装。
 
@@ -55,3 +55,10 @@ Chrome/Edge 导入服务只枚举本机用户目录中 `Default` 与 `Profile N`
 ## 设计文档
 
 参见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+
+
+## HGame 网页游戏库
+
+HGame 继续位于同级的 `10HGame` 项目，统一端口 **43170**，本门户保持 **43100**。游戏代码和服务不嵌入 Portal；门户的服务页提供「HGame 游戏库」入口、状态检测和启动按钮。HGame 无需构建或安装依赖，找到 `10HGame/server.mjs` 即可启动。
+
+运行 `npm run seed:services` 可补充游戏库入口，不覆盖已有服务记录。若门户正在运行旧的生产构建，重新构建并重启后即可看到新增的启动支持。小游戏旧的 43171–43180 独立端口已停用；在游戏库内通过路径切换十个游戏。

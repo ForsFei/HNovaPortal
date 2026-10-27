@@ -12,6 +12,7 @@ type DesktopApp = { kind: "desktop"; project: string; port: number; exe: string 
 type App = WebApp | DesktopApp;
 
 const apps: Record<number, App> = {
+  43170: { kind: "web", project: "10HGame", port: 43170, entry: "server.mjs", args: ["--port", "43170"], prerequisite: "server.mjs" },
   43110: { kind: "web", project: "01HNovaAtlas", port: 43110, entry: "node_modules/serve/build/main.js", args: ["out", "--listen", "tcp://127.0.0.1:43110"], prerequisite: "out/index.html" },
   43120: { kind: "web", project: "02HNovaMuse", port: 43120, entry: "node_modules/next/dist/bin/next", args: ["start", "--hostname", "127.0.0.1", "--port", "43120"], prerequisite: ".next/BUILD_ID" },
   43130: { kind: "desktop", project: "03HNovaPlay", port: 43130, exe: "src/HNovaPlay/bin/Debug/net8.0-windows/HNovaPlay.exe" },

@@ -12,7 +12,8 @@ const definitions = [
   { port: 43130, name: "HNova Play", description: "Windows 桌面应用" },
   { port: 43140, name: "HNova Reader", description: "Windows 桌面应用" },
   { port: 43150, name: "HNova Archive", description: "Windows 桌面应用" },
-  { port: 43160, name: "HNova TrainEcho", description: "本地列车服务" }
+  { port: 43160, name: "HNova TrainEcho", description: "本地列车服务" },
+  { port: 43170, name: "HGame 游戏库", description: "十个网页小游戏的统一入口，单个本地服务" }
 ];
 
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -36,12 +37,13 @@ try {
   const serverName = "本机 HNova 服务";
   const now = new Date().toISOString();
   const existing = db.prepare("SELECT id, name, host, port FROM services").all();
-  const missing = definitions.filter(entry => !existing.some(item =>
+  const selectedDefinitions = process.argv.includes("--game-library-only") ? definitions.filter(entry => entry.port === 43170) : definitions;
+  const missing = selectedDefinitions.filter(entry => !existing.some(item =>
     item.name.toLowerCase() === entry.name.toLowerCase() || (item.host === host && item.port === entry.port)
   ));
 
   if (!missing.length) {
-    console.log("七个 HNova 服务已存在，无需新增。");
+    console.log("HNova 本机服务入口已存在，无需新增。");
   } else {
     const save = db.transaction(() => {
       let server = db.prepare("SELECT id FROM servers WHERE name = ?").get(serverName);

@@ -5,7 +5,7 @@ import { ExternalLink, MoreHorizontal, Play } from "lucide-react";
 import type { Service } from "@/lib/db";
 
 type Status = { kind: "web" | "desktop"; available: boolean; running: boolean };
-const localPorts = new Set([43110, 43120, 43130, 43140, 43150, 43160]);
+const localPorts = new Set([43110, 43120, 43130, 43140, 43150, 43160, 43170]);
 let statusCache: { at: number; value: Promise<Record<number, Status>> } | null = null;
 
 function statuses() {
