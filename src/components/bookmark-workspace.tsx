@@ -44,6 +44,8 @@ export default function BookmarkWorkspace(props: Props) {
   const [layout, setLayout] = useState<Layout>("list");
   const [cardSize, setCardSize] = useState(210);
   const selectionAnchor = useRef<string | null>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const activeRowId = useRef<string | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem("hnova-bookmark-layout");
@@ -82,30 +84,41 @@ export default function BookmarkWorkspace(props: Props) {
     else if (event.ctrlKey || event.metaKey) toggle(id);
     else { selectionAnchor.current = id; setSelected([id]); }
   };
-  const rowKeyDown = (event: React.KeyboardEvent<HTMLDivElement>, type: "items" | "folder", id: string) => {
-    if (busy || event.target !== event.currentTarget) return;
+  const workspaceKeyDown = (event: KeyboardEvent) => {
+    const workspace = workspaceRef.current;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!workspace || busy || event.defaultPrevented || event.isComposing || event.altKey || document.querySelector(".overlay, .nav-popover")) return;
+    if (target?.closest('textarea, select, [contenteditable]:not([contenteditable="false"]), input:not([type="checkbox"]):not([type="radio"])')) return;
+    const rows = [...workspace.querySelectorAll<HTMLElement>("[data-bookmark-row]")];
+    const focusedRow = target?.closest<HTMLElement>("[data-bookmark-row]");
+    const row = (focusedRow && workspace.contains(focusedRow) ? focusedRow : null) || rows.find(value => value.dataset.rowId === activeRowId.current) || rows.find(value => selected.includes(value.dataset.rowId || ""));
+    const id = row?.dataset.rowId;
+    const type = row?.dataset.rowType;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
-      event.preventDefault(); setSelected(visibleItems.map(item => item.id)); selectionAnchor.current = id; return;
+      event.preventDefault(); window.getSelection()?.removeAllRanges(); setSelected(visibleItems.map(item => item.id));
+      selectionAnchor.current = id || visibleItems[0]?.id || null; return;
     }
+    if (event.ctrlKey || event.metaKey) return;
+    if (target && target !== document.body && !workspace.contains(target)) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      if (event.shiftKey && !selectionAnchor.current && type === "items") selectionAnchor.current = id;
-      const rows = [...(event.currentTarget.parentElement?.querySelectorAll<HTMLElement>("[data-bookmark-row]") || [])];
-      const next = rows[Math.max(0, Math.min(rows.length - 1, rows.indexOf(event.currentTarget) + (event.key === "ArrowDown" ? 1 : -1)))];
+      if (event.shiftKey && !selectionAnchor.current && type === "items") selectionAnchor.current = id || null;
+      const next = row ? rows[Math.max(0, Math.min(rows.length - 1, rows.indexOf(row) + (event.key === "ArrowDown" ? 1 : -1)))] : (event.key === "ArrowDown" ? rows[0] : rows.at(-1));
       next?.focus();
+      activeRowId.current = next?.dataset.rowId || null;
       if (event.shiftKey && next?.dataset.rowType === "items") selectRange(next.dataset.rowId!, event.ctrlKey || event.metaKey);
       return;
     }
-    if (event.key === "Escape") { setSelected([]); return; }
+    if (event.key === "Escape") { setSelected([]); selectionAnchor.current = null; return; }
     if (event.key === "Delete") {
       event.preventDefault();
       if (selected.length) deleteItems(selected);
-      else if (type === "items") deleteItems([id]);
+      else if (type === "items" && id) deleteItems([id]);
       else { const folder = folders.find(value => value.id === id); if (folder) deleteFolder(folder); }
       return;
     }
     if (event.key.toLowerCase() === "m" && !event.ctrlKey && !event.metaKey && selected.length) {
-      event.preventDefault(); document.querySelector<HTMLSelectElement>(".folder-selection select")?.focus(); return;
+      event.preventDefault(); workspace.querySelector<HTMLSelectElement>(".folder-selection select")?.focus(); return;
     }
     if (event.key === "F2") {
       event.preventDefault();
@@ -113,10 +126,11 @@ export default function BookmarkWorkspace(props: Props) {
       else { const item = items.find(value => value.id === id); if (item) props.onEditItem?.(item); }
       return;
     }
-    if (event.key === " " && type === "items") { event.preventDefault(); if (event.shiftKey) selectRange(id, event.ctrlKey || event.metaKey); else toggle(id); return; }
+    if ((event.key === " " || event.key === "Enter") && target?.closest("a, button, input")) return;
+    if (event.key === " " && type === "items" && id) { event.preventDefault(); if (event.shiftKey) selectRange(id, false); else toggle(id); return; }
     if (event.key === "Enter") {
       event.preventDefault();
-      if (type === "folder") { setCurrent(id); setSearch(""); }
+      if (type === "folder" && id) { setCurrent(id); setSearch(""); }
       else { const item = items.find(value => value.id === id); if (item) window.open(item.url, "_blank", "noopener,noreferrer"); }
     }
   };
@@ -210,7 +224,18 @@ export default function BookmarkWorkspace(props: Props) {
     crumbs.unshift(folder); cursor = folder.parentId;
   }
 
-  return <div className={`bookmark-workspace ${layout === "grid" ? "bookmark-workspace-grid" : ""}`} style={{ "--bookmark-card-width": `${cardSize}px` } as React.CSSProperties}>
+  useEffect(() => {
+    window.addEventListener("keydown", workspaceKeyDown);
+    return () => window.removeEventListener("keydown", workspaceKeyDown);
+  });
+  useEffect(() => { activeRowId.current = null; selectionAnchor.current = null; }, [current, search]);
+
+  const rememberRow = (event: React.SyntheticEvent<HTMLDivElement>) => {
+    const row = (event.target as Element).closest<HTMLElement>("[data-bookmark-row]");
+    if (row) activeRowId.current = row.dataset.rowId || null;
+  };
+
+  return <div ref={workspaceRef} onFocusCapture={rememberRow} onPointerDownCapture={rememberRow} className={`bookmark-workspace ${layout === "grid" ? "bookmark-workspace-grid" : ""}`} style={{ "--bookmark-card-width": `${cardSize}px` } as React.CSSProperties}>
     <aside className="folder-sidebar">
       <div className="folder-sidebar-head"><strong>文件夹</strong><button title="添加文件夹" onClick={createFolder}><FolderPlus size={17}/></button></div>
       <div className={`folder-root ${current === null ? "active" : ""} ${dragOver === "root" ? "drop-active" : ""}`} {...dropHandlers(null)}>
@@ -229,10 +254,10 @@ export default function BookmarkWorkspace(props: Props) {
       <div className="folder-list-heading"><span>{currentName}</span><small>{visibleFolders.length} 个文件夹 · {visibleItems.length} 个网址</small>{visibleItems.length > 0 && <label className="folder-select-all"><input type="checkbox" checked={allVisibleSelected} onChange={toggleVisible}/> 全选当前网址</label>}<div className="folder-view-controls">{layout === "grid" && <label className="card-size-control">卡片大小 <input type="range" min="160" max="340" step="10" value={cardSize} onChange={event => resizeCards(Number(event.target.value))} aria-label="卡片大小"/><output>{cardSize}px</output></label>}<div className="folder-layout-switch" role="group" aria-label="书签布局"><button type="button" title="列表布局" aria-label="列表布局" aria-pressed={layout === "list"} className={layout === "list" ? "active" : ""} onClick={() => chooseLayout("list")}><List size={15}/></button><button type="button" title="紧凑布局" aria-label="紧凑布局" aria-pressed={layout === "compact"} className={layout === "compact" ? "active" : ""} onClick={() => chooseLayout("compact")}><Rows3 size={15}/></button><button type="button" title="卡片布局" aria-label="卡片布局" aria-pressed={layout === "grid"} className={layout === "grid" ? "active" : ""} onClick={() => chooseLayout("grid")}><LayoutGrid size={15}/></button></div></div></div>
       <p className="folder-keyboard-hint">键盘：↑↓ 定位 · 空格选择 · Shift 扩选 · Ctrl+A 全选 · M 选择目标并回车移动 · Delete 删除 · F2 编辑</p>
       <div className={`folder-list folder-list-${layout}`}>
-        {visibleEntries.map(entry => entry.type === "folder" ? (() => { const folder = entry.value as FolderEntry; return <div key={`folder-${folder.id}`} data-bookmark-row data-row-id={folder.id} data-row-type="folder" tabIndex={0} onKeyDown={event => rowKeyDown(event, "folder", folder.id)} className={`folder-list-row ${dragOver === folder.id ? "drop-active" : ""}`} draggable onDragStart={event => startDrag(event, { area, type: "folder", ids: [folder.id] })} {...dropHandlers(folder.id)} onDrop={event => { const payload = dragged(event); if (payload?.ids.every(id => visibleEntries.some(value => value.type === payload.type && value.value.id === id))) reorder(event, folder.id); else dropOn(event, folder.id); }}>
+        {visibleEntries.map(entry => entry.type === "folder" ? (() => { const folder = entry.value as FolderEntry; return <div key={`folder-${folder.id}`} data-bookmark-row data-row-id={folder.id} data-row-type="folder" tabIndex={0} className={`folder-list-row ${dragOver === folder.id ? "drop-active" : ""}`} draggable onDragStart={event => startDrag(event, { area, type: "folder", ids: [folder.id] })} {...dropHandlers(folder.id)} onDrop={event => { const payload = dragged(event); if (payload?.ids.every(id => visibleEntries.some(value => value.type === payload.type && value.value.id === id))) reorder(event, folder.id); else dropOn(event, folder.id); }}>
           <button className="folder-list-open" onClick={() => { setCurrent(folder.id); setSearch(""); }}><span className="folder-list-icon"><Folder size={19}/></span><strong>{folder.name}</strong><ChevronRight size={16}/></button>
           <button title="重命名" onClick={() => renameFolder(folder)}><MoreHorizontal size={16}/></button><button title="删除文件夹" onClick={() => deleteFolder(folder)}><Trash2 size={15}/></button>
-        </div>; })() : (() => { const item = entry.value as LinkEntry; return <div key={`item-${item.id}`} data-bookmark-row data-row-id={item.id} data-row-type="items" tabIndex={0} onKeyDown={event => rowKeyDown(event, "items", item.id)} onClick={event => { if (event.target === event.currentTarget) selectClicked(event, item.id); }} className={`folder-list-row link-row ${selected.includes(item.id) ? "selected" : ""} ${dragOver === item.id ? "drop-active" : ""}`} draggable onDragStart={event => { const ids = selected.includes(item.id) ? selected : [item.id]; setSelected(ids); startDrag(event, { area, type: "items", ids }); }} onDragOver={event => { event.preventDefault(); setDragOver(item.id); }} onDrop={event => reorder(event, item.id)}>
+        </div>; })() : (() => { const item = entry.value as LinkEntry; return <div key={`item-${item.id}`} data-bookmark-row data-row-id={item.id} data-row-type="items" tabIndex={0} onClick={event => { if (!(event.target as Element).closest("a, button, input, select, textarea")) { event.currentTarget.focus(); selectClicked(event, item.id); } }} className={`folder-list-row link-row ${selected.includes(item.id) ? "selected" : ""} ${dragOver === item.id ? "drop-active" : ""}`} draggable onDragStart={event => { const ids = selected.includes(item.id) ? selected : [item.id]; setSelected(ids); startDrag(event, { area, type: "items", ids }); }} onDragOver={event => { event.preventDefault(); setDragOver(item.id); }} onDrop={event => reorder(event, item.id)}>
           <input type="checkbox" aria-label={`选择 ${item.name}`} checked={selected.includes(item.id)} onChange={() => toggle(item.id)}/>
           {area === "website" ? <SiteIcon url={item.url} icon={item.icon} websiteId={item.id} className="mini-icon"/> : <span className="mini-icon">{area === "private" ? <KeyRound size={16}/> : <Globe2 size={16}/>}</span>}
           <a href={item.url} target="_blank" rel="noopener noreferrer"><strong>{item.name}</strong><small>{item.description || item.url}</small></a>
